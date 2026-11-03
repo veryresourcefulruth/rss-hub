@@ -28,6 +28,6 @@ database_id = "2c617dc3-ff95-4c6c-abc4-dd0e04fe02a1"
 migrations_dir = "migrations-none"
 
 [vars]
-OWNER_EMAIL = "ruth@resourcefulruth.co.uk"
+OWNER_EMAIL = "ruth@resourcefulruth.co.uk,ruth@newbeginnings-nurseries.co.uk"
 ACCESS_TEAM = "little-cherry-9210"
 ACCESS_AUD = "ce3d17ec2e18cde2105eab6be100a09d56308d481aba511ddbdecfe5bc6845d5"

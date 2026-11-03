@@ -158,7 +158,8 @@ async function whoAmI(req, env) {
   const email = env.DEV_MODE === "1" ? (req.headers.get("x-dev-email") || "").toLowerCase() : await verifyAccess(req, env).catch(() => null);
   if (!email) return null;
   const u = await env.DB.prepare("SELECT * FROM users WHERE email=?").bind(email).first();
-  if (!u && email === String(env.OWNER_EMAIL || "").toLowerCase()) {
+  const owners = String(env.OWNER_EMAIL || "").toLowerCase().split(",").map(x => x.trim()).filter(Boolean);
+  if (!u && owners.includes(email)) {
     await env.DB.prepare("INSERT INTO users(email,name,role,created_at) VALUES (?,?,'owner',?)").bind(email, "Ruth Oseme", nowIso()).run();
     return { email, name: "Ruth Oseme", role: "owner", active: 1 };
   }

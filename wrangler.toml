@@ -30,5 +30,4 @@ migrations_dir = "migrations-none"
 [vars]
 OWNER_EMAIL = "ruth@resourcefulruth.co.uk"
 ACCESS_TEAM = "little-cherry-9210"
-# Filled in once the Cloudflare Access application for rss-hub exists:
-ACCESS_AUD = ""
+ACCESS_AUD = "ce3d17ec2e18cde2105eab6be100a09d56308d481aba511ddbdecfe5bc6845d5"

@@ -58,7 +58,8 @@ async function boot() {
 }
 // Refresh the current view when the person comes back to the tab, and every 2 minutes while it's open,
 // so new bookings and sign-offs appear without a manual reload (skipped while a form/drawer is open).
-const refreshIfIdle = () => { if (me && document.visibilityState === "visible" && !$("#drawer-root").innerHTML && !document.activeElement?.matches("input,textarea,select")) render(); };
+const LIST_VIEWS = ["shifts", "hours", "checks", "today", "staff", "nurseries"];
+const refreshIfIdle = () => { if (me && LIST_VIEWS.includes(view) && document.visibilityState === "visible" && !$("#drawer-root").innerHTML && !document.activeElement?.matches("input,textarea,select")) render(); };
 document.addEventListener("visibilitychange", refreshIfIdle);
 setInterval(refreshIfIdle, 120000);
 window.addEventListener("hashchange", () => { const h = location.hash.slice(1); if (me && h !== view && tabsFor().some(t => t[0] === h)) { view = h; render(); } });

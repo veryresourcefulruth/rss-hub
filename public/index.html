@@ -7,6 +7,7 @@
 <meta name="robots" content="noindex">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Young+Serif&family=Albert+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap">
+<script>try{var t=localStorage.getItem("rss-theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)}catch(e){}</script>
 <link rel="stylesheet" href="/style.css">
 <link rel="icon" type="image/png" href="/favicon.png">
 <link rel="apple-touch-icon" href="/rss-logo.png">
@@ -16,12 +17,23 @@
   <header class="top">
     <div class="brand"><img src="/rss-logo.png" alt="Resourceful Staffing Support" class="logo" width="64" height="63"><div><small>Resourceful Staffing Support</small><h1>RSS Hub</h1></div></div>
     <nav class="tabs" id="tabs" aria-label="Sections"></nav>
-  </header>
+    <button class="theme-toggle" id="themeToggle" type="button" aria-label="Switch to dark mode" title="Switch light / dark"></button>
+</header>
   <main id="app"><p class="loading">Loading…</p></main>
   <footer class="foot" id="foot"></footer>
 </div>
 <div id="drawer-root"></div>
 <div class="toast" id="toast" hidden></div>
 <script src="/app.js"></script>
+<script>
+(function(){
+  var b=document.getElementById("themeToggle"), root=document.documentElement;
+  var mq=window.matchMedia("(prefers-color-scheme: dark)");
+  function current(){ return root.getAttribute("data-theme") || (mq.matches ? "dark" : "light"); }
+  function paint(){ var d=current()==="dark"; b.textContent=d?"☀":"☾"; b.setAttribute("aria-label", d?"Switch to light mode":"Switch to dark mode"); }
+  b.onclick=function(){ var next=current()==="dark"?"light":"dark"; root.setAttribute("data-theme",next); try{localStorage.setItem("rss-theme",next)}catch(e){} paint(); };
+  mq.addEventListener && mq.addEventListener("change", paint); paint();
+})();
+</script>
 </body>
 </html>

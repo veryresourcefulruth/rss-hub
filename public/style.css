@@ -201,3 +201,8 @@ textarea{font-family:var(--f-body)!important;font-size:.95rem!important}
 .brand{display:flex;align-items:center;gap:14px}
 .brand .logo{width:64px;height:auto;flex:none}
 @media (max-width:480px){.brand .logo{width:48px}}
+
+.theme-toggle{flex:none;width:40px;height:40px;border-radius:50%;border:1px solid var(--line);background:var(--surface);color:var(--ink);font-size:1.15rem;line-height:1;cursor:pointer;display:grid;place-items:center}
+.theme-toggle:hover{border-color:var(--accent)}
+header.top{flex-wrap:wrap}
+@media print{.theme-toggle{display:none!important}}

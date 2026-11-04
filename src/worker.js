@@ -20,6 +20,7 @@ export function ukNow(d = new Date()) {
 const toMin = t => { const m = /^(\d{2}):(\d{2})$/.exec(t || ""); return m && +m[1] < 24 && +m[2] < 60 ? +m[1] * 60 + +m[2] : null; };
 const validDate = d => /^\d{4}-\d{2}-\d{2}$/.test(d || "") && new Date(d + "T00:00:00Z").toISOString().slice(0, 10) === d;
 const addDays = (d, n) => { const t = new Date(d + "T12:00:00Z"); t.setUTCDate(t.getUTCDate() + n); return t.toISOString().slice(0, 10); };
+const addYears = (d, n) => { const t = new Date(d + "T12:00:00Z"); t.setUTCFullYear(t.getUTCFullYear() + n); return t.toISOString().slice(0, 10); };
 const mondayOf = d => { const t = new Date(d + "T12:00:00Z"); const w = (t.getUTCDay() + 6) % 7; return addDays(d, -w); };
 export function shiftMins(start, finish, brk) {
   const s = toMin(start), f = toMin(finish);
@@ -38,8 +39,8 @@ const penceFrom = v => { if (v === "" || v == null) return null; const n = Math.
 // ---------- compliance ----------
 // required: must be verified (and in date) before anyone can be booked.
 // group: vetting (pre-employment checks) or training. core = RSS core training, required before booking.
-// years = usual validity, used to suggest an expiry date. EYFS 2026: safeguarding refreshed at least every 2 years;
-// paediatric first aid every 3. Expired required items block booking.
+// years = validity. RSS policy: all training expires 1 year after the issue date; the server sets the expiry,
+// so it can't be typed in differently. Expired required items block booking.
 export const CHECKS = {
   dbs: { group: "vetting", label: "Enhanced DBS with barred list (children)", required: true, refLabel: "Certificate number", issued: true },
   rtw: { group: "vetting", label: "Right to work in the UK", required: true, refLabel: "Share code or document seen", expires: true },
@@ -47,14 +48,14 @@ export const CHECKS = {
   ref1: { group: "vetting", label: "Reference 1", required: true, refLabel: "Referee name and organisation" },
   ref2: { group: "vetting", label: "Reference 2", required: true, refLabel: "Referee name and organisation" },
   terms: { group: "vetting", label: "RSS terms of engagement signed", required: true, refLabel: "Version signed", issued: true },
-  safeguarding: { group: "training", core: true, label: "Safeguarding Level 2", required: true, refLabel: "Course and provider", issued: true, expires: true, years: 2 },
-  prevent: { group: "training", core: true, label: "The Prevent Duty and British Values", required: true, refLabel: "Course and provider", issued: true, expires: true, years: 2 },
-  food: { group: "training", core: true, label: "Food Safety & Hygiene", required: true, refLabel: "Course and provider", issued: true, expires: true, years: 3 },
-  hs: { group: "training", core: true, label: "Health & Safety in the Workplace", required: true, refLabel: "Course and provider", issued: true, expires: true, years: 3 },
-  safesleep: { group: "training", core: true, label: "Safe Sleep", required: true, refLabel: "Course and provider", issued: true, expires: true, years: 2 },
-  babies: { group: "training", core: true, label: "Blossoming Babies", required: true, refLabel: "Course and provider", issued: true, expires: true, years: 3 },
+  safeguarding: { group: "training", core: true, label: "Safeguarding Level 2", required: true, refLabel: "Course and provider", issued: true, expires: true, years: 1 },
+  prevent: { group: "training", core: true, label: "The Prevent Duty and British Values", required: true, refLabel: "Course and provider", issued: true, expires: true, years: 1 },
+  food: { group: "training", core: true, label: "Food Safety & Hygiene", required: true, refLabel: "Course and provider", issued: true, expires: true, years: 1 },
+  hs: { group: "training", core: true, label: "Health & Safety in the Workplace", required: true, refLabel: "Course and provider", issued: true, expires: true, years: 1 },
+  safesleep: { group: "training", core: true, label: "Safe Sleep", required: true, refLabel: "Course and provider", issued: true, expires: true, years: 1 },
+  babies: { group: "training", core: true, label: "Blossoming Babies", required: true, refLabel: "Course and provider", issued: true, expires: true, years: 1 },
   qual: { group: "training", label: "Childcare qualification", required: false, refLabel: "Qualification title", issued: true },
-  pfa: { group: "training", label: "Paediatric first aid (12-hour or 6-hour)", required: false, refLabel: "Provider / certificate number", issued: true, expires: true, years: 3 },
+  pfa: { group: "training", label: "Paediatric first aid (12-hour or 6-hour)", required: false, refLabel: "Provider / certificate number", issued: true, expires: true, years: 1 },
 };
 const EXPIRY_WARN_DAYS = 30;
 export const QUAL_LEVELS = ["GCSE / O level", "A level / BTEC", "Level 2 childcare", "Level 3 childcare", "Foundation degree / HND", "BA", "BSc", "BEd", "LLB", "MA", "MSc", "MEd", "MBA", "PGCE", "PGDip / PGCert", "PhD / Doctorate", "Other"];
@@ -538,7 +539,10 @@ async function api(req, env, url) {
     if (isAdmin && ["pending", "verified", "rejected"].includes(b.status)) status = b.status;
     else if (!isAdmin) status = "pending"; // a staff edit always needs re-checking
     const verified = status === "verified" && (existing?.status !== "verified" || isAdmin);
-    const vals = [clean(b.ref, 200) || null, JSON.stringify(detail), b.issued_on || null, def.expires ? b.expires_on || null : null, cleanMulti(b.notes, 1000) || null];
+    const fixedTerm = def.group === "training" && def.expires && def.years;
+    if (fixedTerm && b.status === "verified" && !b.issued_on) bad("Enter the issue date. Training expires one year after it.");
+    const expires = fixedTerm ? (b.issued_on ? addYears(b.issued_on, def.years) : null) : def.expires ? b.expires_on || null : null;
+    const vals = [clean(b.ref, 200) || null, JSON.stringify(detail), b.issued_on || null, expires, cleanMulti(b.notes, 1000) || null];
     if (status === "verified" && def.expires && !vals[3] && type !== "rtw") bad("Enter the expiry date before verifying.");
     if (existing) {
       await env.DB.prepare("UPDATE checks SET ref=?, detail=?, issued_on=?, expires_on=?, notes=?, status=?, verified_by=?, verified_at=? WHERE id=?")

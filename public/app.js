@@ -123,7 +123,9 @@ function checkForm(email, type, c, admin, user) {
   <form id="ckf"><div class="form-grid">
     <label class="fld" for="ck_ref">${esc(def.refLabel)}<input type="text" id="ck_ref" value="${esc(c?.ref)}"></label>
     ${def.issued ? `<label class="fld" for="ck_iss">Issue date<input type="date" id="ck_iss" value="${esc(c?.issued_on)}"></label>` : ""}
-    ${def.expires ? `<label class="fld" for="ck_exp">${type === "rtw" ? "Permission ends (blank if no time limit)" : "Expiry / renewal date"}<input type="date" id="ck_exp" value="${esc(c?.expires_on)}"><span class="note" id="ck_exp_hint" style="font-weight:400">${def.years ? `Usually valid ${def.years} year${def.years > 1 ? "s" : ""}.` : ""}</span></label>` : ""}
+    ${def.expires ? (def.group === "training" && def.years
+      ? `<label class="fld" for="ck_exp">Expiry date<input type="date" id="ck_exp" value="${esc(c?.expires_on)}" disabled><span class="note" style="font-weight:400">Set automatically: 1 year after the issue date (RSS policy).</span></label>`
+      : `<label class="fld" for="ck_exp">${type === "rtw" ? "Permission ends (blank if no time limit)" : "Expiry / renewal date"}<input type="date" id="ck_exp" value="${esc(c?.expires_on)}"></label>`) : ""}
     ${type === "dbs" ? `<label class="fld" for="ck_lsc">Last Update Service status check<input type="date" id="ck_lsc" value="${esc(d.last_status_check)}"></label>` : ""}
     ${type === "rtw" && admin ? `<label class="fld" for="ck_whl">Weekly hours limit (e.g. 20 on a Student visa in term time)<input type="number" id="ck_whl" min="1" max="60" value="${esc(d.weekly_hours_limit)}"></label>` : ""}
     ${type === "qual" && admin ? `<label class="fld" for="ck_lvl">Level<select id="ck_lvl">${[[0, "Not relevant / below Level 2"], [2, "Level 2"], [3, "Level 3 (full and relevant)"], [6, "Level 6 / QTS / EYTS"]].map(([v, l]) => `<option value="${v}" ${(user?.qual_level || 0) === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>` : ""}
@@ -163,11 +165,9 @@ function wireCheckForm(root, email, type, admin, after) {
   loadDocs().catch(e => root.querySelector("#ck_docs").textContent = e.message);
   const iss = root.querySelector("#ck_iss"), exp = root.querySelector("#ck_exp"), yrs = me.checkTypes[type].years;
   if (iss && exp && yrs) iss.addEventListener("change", () => {
-    if (!iss.value || exp.dataset.touched) return;
+    if (!iss.value) { exp.value = ""; return; }
     const d = new Date(iss.value + "T12:00:00Z"); d.setUTCFullYear(d.getUTCFullYear() + yrs); exp.value = d.toISOString().slice(0, 10);
-    root.querySelector("#ck_exp_hint").textContent = `Filled in as ${yrs} year${yrs > 1 ? "s" : ""} after the issue date. Change it if the certificate says otherwise.`;
   });
-  if (exp) exp.addEventListener("input", () => exp.dataset.touched = 1);
   root.querySelector("#ckf").onsubmit = async e => {
     e.preventDefault();
     const g = id => root.querySelector("#" + id);

@@ -37,17 +37,61 @@ const penceFrom = v => { if (v === "" || v == null) return null; const n = Math.
 
 // ---------- compliance ----------
 // required: must be verified (and in date) before anyone can be booked.
+// group: vetting (pre-employment checks) or training. core = RSS core training, required before booking.
+// years = usual validity, used to suggest an expiry date. EYFS 2026: safeguarding refreshed at least every 2 years;
+// paediatric first aid every 3. Expired required items block booking.
 export const CHECKS = {
-  dbs: { label: "Enhanced DBS with barred list (children)", required: true, refLabel: "Certificate number", issued: true },
-  rtw: { label: "Right to work in the UK", required: true, refLabel: "Share code or document seen", expires: true },
-  id: { label: "Photo ID seen", required: true, refLabel: "Document type" },
-  ref1: { label: "Reference 1", required: true, refLabel: "Referee name and organisation" },
-  ref2: { label: "Reference 2", required: true, refLabel: "Referee name and organisation" },
-  terms: { label: "RSS terms of engagement signed", required: true, refLabel: "Version signed", issued: true },
-  qual: { label: "Childcare qualification", required: false, refLabel: "Qualification title", issued: true },
-  pfa: { label: "Paediatric first aid certificate", required: false, refLabel: "Provider / certificate number", issued: true, expires: true },
-  safeguarding: { label: "Accredited safeguarding training", required: false, refLabel: "Course and provider", issued: true, expires: true },
+  dbs: { group: "vetting", label: "Enhanced DBS with barred list (children)", required: true, refLabel: "Certificate number", issued: true },
+  rtw: { group: "vetting", label: "Right to work in the UK", required: true, refLabel: "Share code or document seen", expires: true },
+  id: { group: "vetting", label: "Photo ID seen", required: true, refLabel: "Document type" },
+  ref1: { group: "vetting", label: "Reference 1", required: true, refLabel: "Referee name and organisation" },
+  ref2: { group: "vetting", label: "Reference 2", required: true, refLabel: "Referee name and organisation" },
+  terms: { group: "vetting", label: "RSS terms of engagement signed", required: true, refLabel: "Version signed", issued: true },
+  safeguarding: { group: "training", core: true, label: "Safeguarding Level 2", required: true, refLabel: "Course and provider", issued: true, expires: true, years: 2 },
+  food: { group: "training", core: true, label: "Food safety and hygiene", required: true, refLabel: "Course and provider", issued: true, expires: true, years: 3 },
+  prevent: { group: "training", core: true, label: "Prevent duty", required: true, refLabel: "Course and provider", issued: true, expires: true, years: 2 },
+  qual: { group: "training", label: "Childcare qualification", required: false, refLabel: "Qualification title", issued: true },
+  pfa: { group: "training", label: "Paediatric first aid (12-hour or 6-hour)", required: false, refLabel: "Provider / certificate number", issued: true, expires: true, years: 3 },
 };
+const EXPIRY_WARN_DAYS = 30;
+export const QUAL_LEVELS = ["GCSE / O level", "A level / BTEC", "Level 2 childcare", "Level 3 childcare", "Foundation degree / HND", "BA", "BSc", "BEd", "LLB", "MA", "MSc", "MEd", "MBA", "PGCE", "PGDip / PGCert", "PhD / Doctorate", "Other"];
+async function photoSet(env, emails) {
+  if (!emails.length) return new Set();
+  const { results } = await env.DB.prepare(`SELECT email FROM photos WHERE email IN (${emails.map(() => "?").join(",")})`).bind(...emails).all();
+  return new Set(results.map(r => r.email));
+}
+async function qualsFor(env, emails) {
+  const out = Object.fromEntries(emails.map(e => [e, []]));
+  if (!emails.length) return out;
+  const { results } = await env.DB.prepare(`SELECT * FROM quals WHERE email IN (${emails.map(() => "?").join(",")}) ORDER BY status, year DESC, id`).bind(...emails).all();
+  for (const q of results) out[q.email].push(q);
+  return out;
+}
+const qualPublic = q => ({ level: q.level, subject: q.subject, institution: q.institution, status: q.status, year: q.year, verified: !!q.verified });
+// Verified items that have expired or expire within the warning window.
+export function expiringFor(checks, today) {
+  const soon = addDays(today, EXPIRY_WARN_DAYS), out = [];
+  for (const c of Object.values(checks || {})) {
+    if (c.status !== "verified" || !c.expires_on || c.expires_on > soon) continue;
+    out.push({ type: c.type, label: CHECKS[c.type]?.label || c.type, expires_on: c.expires_on, expired: c.expires_on < today });
+  }
+  return out.sort((a, b) => a.expires_on.localeCompare(b.expires_on));
+}
+// What a nursery may see about a worker: what's verified and when it expires. Never documents or reference details.
+export function assuranceFor(user, checks, training, quals = []) {
+  const c = checks || {}, ok = t => c[t]?.status === "verified";
+  return {
+    name: user.name, qual_level: ok("qual") ? user.qual_level || 0 : 0, qual_title: ok("qual") ? c.qual.ref : null,
+    dbs: ok("dbs") ? { issued: c.dbs.issued_on, update_service: !!c.dbs.detail?.update_service, verified_at: c.dbs.verified_at } : null,
+    rtw: ok("rtw"), refs: ok("ref1") && ok("ref2"), id: ok("id"),
+    childcare101: !!training?.complete, childcare101_at: training?.declaredAt || null,
+    pfa_expires: ok("pfa") ? c.pfa.expires_on || "verified" : null,
+    safeguarding_expires: ok("safeguarding") ? c.safeguarding.expires_on || "verified" : null,
+    training: Object.entries(CHECKS).filter(([k, d]) => d.group === "training" && k !== "qual" && ok(k))
+      .map(([k, d]) => ({ type: k, label: d.label, issued: c[k].issued_on, expires: c[k].expires_on })),
+    quals: quals.map(qualPublic),
+  };
+}
 
 async function trainingFor(env, users) {
   // Childcare 101 completion, read from the training app's database.
@@ -111,11 +155,11 @@ export function blockers(user, checks, training, shift, weekMins = 0) {
 
 async function weekMinsFor(env, email, date, excludeId = 0) {
   const from = mondayOf(date), to = addDays(from, 6);
-  const { results } = await env.DB.prepare("SELECT start,finish,break_min FROM shifts WHERE worker_email=? AND status='filled' AND date BETWEEN ? AND ? AND id<>?").bind(email, from, to, excludeId).all();
+  const { results } = await env.DB.prepare("SELECT start,finish,break_min FROM shifts WHERE worker_email=? AND status IN ('filled','pending') AND date BETWEEN ? AND ? AND id<>?").bind(email, from, to, excludeId).all();
   return results.reduce((a, s) => a + (shiftMins(s.start, s.finish, s.break_min) || 0), 0);
 }
 async function clashes(env, email, shift) {
-  const { results } = await env.DB.prepare("SELECT id,start,finish FROM shifts WHERE worker_email=? AND status='filled' AND date=? AND id<>?").bind(email, shift.date, shift.id || 0).all();
+  const { results } = await env.DB.prepare("SELECT id,start,finish FROM shifts WHERE worker_email=? AND status IN ('filled','pending') AND date=? AND id<>?").bind(email, shift.date, shift.id || 0).all();
   const s = toMin(shift.start), f = toMin(shift.finish);
   return results.some(r => toMin(r.start) < f && toMin(r.finish) > s);
 }
@@ -194,7 +238,8 @@ const SHIFT_FROM = `FROM shifts s JOIN clients c ON c.id=s.client_id LEFT JOIN u
 function shiftOut(s, role) {
   const mins = shiftMins(s.start, s.finish, s.break_min);
   const actMins = s.act_start ? shiftMins(s.act_start, s.act_finish, s.act_break) : null;
-  const o = { ...s, mins, actMins, offered_to: s.offered_to ? JSON.parse(s.offered_to) : null };
+  const o = { ...s, mins, actMins, offered_to: s.offered_to ? JSON.parse(s.offered_to) : null, declined: s.declined ? JSON.parse(s.declined) : [] };
+  if (role === "staff") o.declined = [];
   if (role === "staff") { delete o.charge_rate; delete o.offered_to; }
   if (role === "manager") { delete o.pay_rate; delete o.offered_to; }
   return o;
@@ -213,6 +258,14 @@ function readShiftInput(b, partial = false) {
   if (!partial || b.needs_l3 !== undefined) o.needs_l3 = b.needs_l3 ? 1 : 0;
   if (!partial || b.needs_pfa !== undefined) o.needs_pfa = b.needs_pfa ? 1 : 0;
   return o;
+}
+
+function readQual(b) {
+  if (!QUAL_LEVELS.includes(b.level)) bad("Pick the qualification level.");
+  const subject = clean(b.subject, 150); if (!subject) bad("Enter the subject, e.g. Early Childhood Studies.");
+  if (!["completed", "in_progress"].includes(b.status)) bad("Say whether it's completed or in progress.");
+  const year = clean(b.year, 4); if (year && !/^(19|20)\d\d$/.test(year)) bad("Year must be four digits, e.g. 2025.");
+  return { level: b.level, subject, institution: clean(b.institution, 150) || null, status: b.status, year: year || null, verified: !!b.verified };
 }
 
 // ---------- CSV ----------
@@ -235,12 +288,12 @@ async function api(req, env, url) {
 
   // ===== everyone =====
   if (p === "/api/me" && method === "GET") {
-    const out = { email: me.email, name: me.name, role, today, checkTypes: CHECKS };
+    const out = { email: me.email, name: me.name, role, today, checkTypes: CHECKS, qualLevels: QUAL_LEVELS };
     if (role === "manager") out.client = await env.DB.prepare("SELECT id,name FROM clients WHERE id=?").bind(me.client_id).first();
     if (role === "staff") {
       const checks = (await checksFor(env, [me.email]))[me.email];
       const training = (await trainingFor(env, [me]))[me.email];
-      Object.assign(out, { checks, training, qual_level: me.qual_level, blockers: blockers(me, checks, training, null) });
+      Object.assign(out, { checks, training, qual_level: me.qual_level, blockers: blockers(me, checks, training, null), expiring: expiringFor(checks, today), quals: (await qualsFor(env, [me.email]))[me.email], has_photo: (await photoSet(env, [me.email])).has(me.email) });
     }
     return json(out);
   }
@@ -260,20 +313,25 @@ async function api(req, env, url) {
       const emails = [...new Set(results.filter(s => s.worker_email).map(s => s.worker_email))];
       const ch = await checksFor(env, emails);
       const us = emails.length ? (await env.DB.prepare(`SELECT email,name,training_name,qual_level FROM users WHERE email IN (${emails.map(() => "?").join(",")})`).bind(...emails).all()).results : [];
-      const tr = await trainingFor(env, us);
+      const tr = await trainingFor(env, us), qs = await qualsFor(env, emails), phs = await photoSet(env, emails);
       for (const s of out) if (s.worker_email) {
-        const c = ch[s.worker_email] || {}, u = us.find(x => x.email === s.worker_email);
-        s.assurance = {
-          dbs: c.dbs?.status === "verified" ? { issued: c.dbs.issued_on, update_service: !!c.dbs.detail?.update_service, verified_at: c.dbs.verified_at } : null,
-          rtw: c.rtw?.status === "verified", refs: c.ref1?.status === "verified" && c.ref2?.status === "verified", id: c.id?.status === "verified",
-          training: tr[s.worker_email]?.complete || false,
-          qual_level: c.qual?.status === "verified" ? u?.qual_level || 0 : 0,
-          pfa_expires: c.pfa?.status === "verified" ? c.pfa.expires_on || "verified" : null,
-          safeguarding_expires: c.safeguarding?.status === "verified" ? c.safeguarding.expires_on || "verified" : null,
-        };
+        const u = us.find(x => x.email === s.worker_email);
+        if (u) s.assurance = { ...assuranceFor(u, ch[s.worker_email], tr[s.worker_email], qs[s.worker_email]), photo: phs.has(s.worker_email) ? `/api/photo/${encodeURIComponent(s.worker_email)}` : null };
       }
     }
     return json(out);
+  }
+
+  // ===== nursery manager: everyone RSS has sent or is sending them =====
+  if (p === "/api/our-staff" && method === "GET") {
+    need(role === "manager");
+    const { results } = await env.DB.prepare(`SELECT s.worker_email email, MAX(CASE WHEN s.date<? THEN s.date END) last_date, MIN(CASE WHEN s.date>=? THEN s.date END) next_date, COUNT(*) shifts
+      FROM shifts s WHERE s.client_id=? AND s.status IN ('filled','pending') AND s.worker_email IS NOT NULL AND s.date>=? GROUP BY s.worker_email`).bind(today, today, me.client_id, addDays(today, -180)).all();
+    if (!results.length) return json([]);
+    const emails = results.map(r => r.email);
+    const us = (await env.DB.prepare(`SELECT email,name,training_name,qual_level FROM users WHERE email IN (${emails.map(() => "?").join(",")})`).bind(...emails).all()).results;
+    const ch = await checksFor(env, emails), tr = await trainingFor(env, us), qs = await qualsFor(env, emails), phs = await photoSet(env, emails);
+    return json(us.map(u => ({ ...assuranceFor(u, ch[u.email], tr[u.email], qs[u.email]), ...results.find(r => r.email === u.email), email: undefined, photo: phs.has(u.email) ? `/api/photo/${encodeURIComponent(u.email)}` : null })).sort((a, b) => a.name.localeCompare(b.name)));
   }
 
   // ===== shifts: staff see open shifts they're offered =====
@@ -360,36 +418,59 @@ async function api(req, env, url) {
       return json({ ok: true });
     }
 
-    if ((action === "assign" || action === "accept") && method === "POST") {
-      const b = await body();
-      const email = action === "accept" ? me.email : String(b.email || "").toLowerCase();
-      if (action === "accept") {
-        need(role === "staff");
+    // RSS asks a named worker -> status 'pending' until they confirm. A worker taking an open shift
+    // themselves is their acceptance, so it goes straight to 'filled'.
+    if (action === "assign" && method === "POST") {
+      need(isAdmin);
+      if (!["requested", "open"].includes(s.status)) bad("This shift is already booked, waiting for someone to confirm, or cancelled. Unassign it first.");
+      if (s.date < today) bad("That shift is in the past.");
+      const b = await body(), email = String(b.email || "").toLowerCase();
+      const why = await bookingBlockers(env, email, s);
+      if (why.length && !(b.override && role === "owner")) return json({ error: `Can't book this shift: ${why.join("; ")}.`, blockers: why }, 409);
+      const r = await env.DB.prepare("UPDATE shifts SET status='pending', worker_email=?, assigned_at=?, override_by=? WHERE id=? AND status IN ('requested','open') AND worker_email IS NULL")
+        .bind(email, nowIso(), why.length ? me.email : null, id).run();
+      if (!r.meta.changes) bad("Someone else has just taken this shift.");
+      await audit(env, me.email, "shift_assign", id, { worker: email, override: why.length ? why : undefined });
+      return json({ ok: true, pending: true });
+    }
+
+    if (action === "accept" && method === "POST") {
+      need(role === "staff");
+      if (s.date < today) bad("That shift is in the past.");
+      const confirming = s.status === "pending" && s.worker_email === me.email;
+      if (!confirming) {
         if (s.status !== "open") bad("Sorry, this shift has already been taken or is no longer available.");
         const offered = s.offered_to ? JSON.parse(s.offered_to) : null;
         if (offered && !offered.includes(me.email)) throw new HttpError(403, "This shift wasn't offered to you.");
-      } else {
-        need(isAdmin);
-        if (!["requested", "open"].includes(s.status)) bad("This shift is already filled or cancelled. Unassign it first.");
       }
-      if (s.date < today) bad("That shift is in the past.");
-      const why = await bookingBlockers(env, email, s);
-      if (why.length && !(action === "assign" && b.override && role === "owner")) return json({ error: `Can't book this shift: ${why.join("; ")}.`, blockers: why }, 409);
-      const w = await env.DB.prepare("SELECT pay_rate FROM users WHERE email=?").bind(email).first();
+      const why = await bookingBlockers(env, me.email, s);
+      if (why.length && !(confirming && s.override_by)) return json({ error: `Can't book this shift: ${why.join("; ")}.`, blockers: why }, 409);
+      const w = await env.DB.prepare("SELECT pay_rate FROM users WHERE email=?").bind(me.email).first();
       const c = await env.DB.prepare("SELECT charge_rate FROM clients WHERE id=?").bind(s.client_id).first();
-      const r = await env.DB.prepare("UPDATE shifts SET status='filled', worker_email=?, filled_at=?, pay_rate=?, charge_rate=? WHERE id=? AND status IN ('requested','open') AND worker_email IS NULL")
-        .bind(email, nowIso(), w?.pay_rate ?? 0, c?.charge_rate ?? 0, id).run();
-      if (!r.meta.changes) bad("Sorry, someone else has just taken this shift.");
-      await audit(env, me.email, action === "accept" ? "shift_accept" : "shift_assign", id, { worker: email, override: why.length ? why : undefined });
+      const r = confirming
+        ? await env.DB.prepare("UPDATE shifts SET status='filled', filled_at=?, pay_rate=?, charge_rate=? WHERE id=? AND status='pending' AND worker_email=?").bind(nowIso(), w?.pay_rate ?? 0, c?.charge_rate ?? 0, id, me.email).run()
+        : await env.DB.prepare("UPDATE shifts SET status='filled', worker_email=?, filled_at=?, pay_rate=?, charge_rate=? WHERE id=? AND status='open' AND worker_email IS NULL").bind(me.email, nowIso(), w?.pay_rate ?? 0, c?.charge_rate ?? 0, id).run();
+      if (!r.meta.changes) bad("Sorry, this shift has just changed. Reload to see the latest.");
+      await audit(env, me.email, confirming ? "shift_confirm" : "shift_accept", id, null);
+      return json({ ok: true });
+    }
+
+    if (action === "decline" && method === "POST") {
+      need(role === "staff" && s.status === "pending" && s.worker_email === me.email);
+      const b = await body();
+      const declined = [...(s.declined ? JSON.parse(s.declined) : []), { email: me.email, name: me.name, at: nowIso(), reason: clean(b.reason, 200) || null }];
+      await env.DB.prepare("UPDATE shifts SET status='requested', worker_email=NULL, assigned_at=NULL, override_by=NULL, declined=? WHERE id=? AND status='pending' AND worker_email=?")
+        .bind(JSON.stringify(declined), id, me.email).run();
+      await audit(env, me.email, "shift_decline", id, { reason: b.reason });
       return json({ ok: true });
     }
 
     if (action === "unassign" && method === "POST") {
       need(isAdmin);
-      if (s.status !== "filled") bad("Nobody is booked on this shift.");
+      if (s.status !== "filled" && s.status !== "pending") bad("Nobody is booked on this shift.");
       if (s.ts_status !== "none") bad("A timesheet has been submitted for this shift, so it can't be unassigned.");
       const b = await body();
-      await env.DB.prepare("UPDATE shifts SET status='open', worker_email=NULL, filled_at=NULL, pay_rate=NULL, charge_rate=NULL WHERE id=?").bind(id).run();
+      await env.DB.prepare("UPDATE shifts SET status='requested', worker_email=NULL, filled_at=NULL, assigned_at=NULL, override_by=NULL, pay_rate=NULL, charge_rate=NULL WHERE id=?").bind(id).run();
       await audit(env, me.email, "shift_unassign", id, { worker: s.worker_email, reason: clean(b.reason, 300) });
       return json({ ok: true });
     }
@@ -509,6 +590,59 @@ async function api(req, env, url) {
     return new Response(d.data, { headers: { "content-type": d.mime, "content-disposition": `inline; filename="${d.filename.replace(/"/g, "")}"`, "cache-control": "private, no-store", "x-content-type-options": "nosniff" } });
   }
 
+  // ===== headshots =====
+  if ((m = /^\/api\/photo\/([^/]+)$/.exec(p))) {
+    const email = decodeURIComponent(m[1]).toLowerCase();
+    if (method === "PUT" || method === "DELETE") {
+      need(isAdmin || (role === "staff" && email === me.email));
+      if (!(await env.DB.prepare("SELECT 1 FROM users WHERE email=? AND role='staff'").bind(email).first())) return fail(404, "No such staff member.");
+      if (method === "DELETE") { await env.DB.prepare("DELETE FROM photos WHERE email=?").bind(email).run(); await audit(env, me.email, "photo_delete", email, null); return json({ ok: true }); }
+      const mime = (req.headers.get("content-type") || "").split(";")[0];
+      if (!/^image\/(jpeg|png|webp)$/.test(mime)) bad("Upload a JPG or PNG photo.");
+      const data = await req.arrayBuffer();
+      if (!data.byteLength || data.byteLength > 400_000) bad("That photo is too large. Try a smaller one.");
+      await env.DB.prepare("INSERT INTO photos(email,mime,data,updated_by,updated_at) VALUES (?,?,?,?,?) ON CONFLICT(email) DO UPDATE SET mime=excluded.mime, data=excluded.data, updated_by=excluded.updated_by, updated_at=excluded.updated_at")
+        .bind(email, mime, data, me.email, nowIso()).run();
+      await audit(env, me.email, "photo_upload", email, null);
+      return json({ ok: true });
+    }
+    if (method === "GET") {
+      let allowed = isAdmin || email === me.email;
+      if (!allowed && role === "manager") allowed = !!(await env.DB.prepare("SELECT 1 FROM shifts WHERE worker_email=? AND client_id=? AND status IN ('filled','pending')").bind(email, me.client_id).first());
+      need(allowed);
+      const ph = await env.DB.prepare("SELECT mime,data FROM photos WHERE email=?").bind(email).first();
+      if (!ph) return fail(404, "No photo.");
+      return new Response(ph.data, { headers: { "content-type": ph.mime, "cache-control": "private, max-age=300", "x-content-type-options": "nosniff" } });
+    }
+  }
+
+  // ===== qualifications (staff manage their own; RSS verifies) =====
+  if ((m = /^\/api\/staff\/([^/]+)\/quals$/.exec(p)) && method === "POST") {
+    const email = decodeURIComponent(m[1]).toLowerCase();
+    need(isAdmin || (role === "staff" && email === me.email));
+    if (!(await env.DB.prepare("SELECT 1 FROM users WHERE email=? AND role='staff'").bind(email).first())) return fail(404, "No such staff member.");
+    const q = readQual(await body());
+    await env.DB.prepare("INSERT INTO quals(email,level,subject,institution,status,year,verified,verified_by,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)")
+      .bind(email, q.level, q.subject, q.institution, q.status, q.year, isAdmin && q.verified ? 1 : 0, isAdmin && q.verified ? me.email : null, me.email, nowIso()).run();
+    await audit(env, me.email, "qual_add", email, q);
+    return json((await qualsFor(env, [email]))[email]);
+  }
+  if ((m = /^\/api\/quals\/(\d+)$/.exec(p)) && (method === "PUT" || method === "DELETE")) {
+    const q0 = await env.DB.prepare("SELECT * FROM quals WHERE id=?").bind(Number(m[1])).first();
+    if (!q0) return fail(404, "That qualification no longer exists.");
+    need(isAdmin || (role === "staff" && q0.email === me.email));
+    if (method === "DELETE") {
+      await env.DB.prepare("DELETE FROM quals WHERE id=?").bind(q0.id).run();
+      await audit(env, me.email, "qual_delete", q0.email, { level: q0.level, subject: q0.subject });
+    } else {
+      const q = readQual(await body()), v = isAdmin ? (q.verified ? 1 : 0) : 0;
+      await env.DB.prepare("UPDATE quals SET level=?,subject=?,institution=?,status=?,year=?,verified=?,verified_by=? WHERE id=?")
+        .bind(q.level, q.subject, q.institution, q.status, q.year, v, v ? me.email : null, q0.id).run();
+      await audit(env, me.email, "qual_update", q0.email, q);
+    }
+    return json((await qualsFor(env, [q0.email]))[q0.email]);
+  }
+
   // ===== admin only below =====
   need(isAdmin);
 
@@ -516,15 +650,16 @@ async function api(req, env, url) {
     const q = (sql, ...a) => env.DB.prepare(sql).bind(...a).first().then(r => r?.n || 0);
     const { results: staff } = await env.DB.prepare("SELECT * FROM users WHERE role='staff' AND active=1").all();
     const ch = await checksFor(env, staff.map(u => u.email)), tr = await trainingFor(env, staff);
-    const soon = addDays(today, 30), expiring = [], notReady = [];
+    const expiring = [], notReady = [];
     for (const u of staff) {
       const why = blockers(u, ch[u.email], tr[u.email], null);
       if (why.length) notReady.push({ email: u.email, name: u.name, blockers: why });
-      for (const c of Object.values(ch[u.email])) if (c.status === "verified" && c.expires_on && c.expires_on <= soon) expiring.push({ email: u.email, name: u.name, type: c.type, label: CHECKS[c.type]?.label, expires_on: c.expires_on });
+      for (const x of expiringFor(ch[u.email], today)) expiring.push({ email: u.email, name: u.name, ...x });
     }
     return json({
       requested: await q("SELECT COUNT(*) n FROM shifts WHERE status='requested' AND date>=?", today),
       open: await q("SELECT COUNT(*) n FROM shifts WHERE status='open' AND date>=?", today),
+      pending: await q("SELECT COUNT(*) n FROM shifts WHERE status='pending' AND date>=?", today),
       next7: await q("SELECT COUNT(*) n FROM shifts WHERE status='filled' AND date BETWEEN ? AND ?", today, addDays(today, 7)),
       toSubmit: await q("SELECT COUNT(*) n FROM shifts WHERE status='filled' AND ts_status='none' AND date<?", today),
       awaiting: await q("SELECT COUNT(*) n FROM shifts WHERE ts_status='submitted'"),
@@ -537,8 +672,8 @@ async function api(req, env, url) {
 
   if (p === "/api/staff" && method === "GET") {
     const { results: staff } = await env.DB.prepare("SELECT * FROM users WHERE role='staff' ORDER BY active DESC, name").all();
-    const ch = await checksFor(env, staff.map(u => u.email)), tr = await trainingFor(env, staff);
-    return json(staff.map(u => ({ ...u, checks: ch[u.email], training: tr[u.email], blockers: blockers(u, ch[u.email], tr[u.email], null) })));
+    const ch = await checksFor(env, staff.map(u => u.email)), tr = await trainingFor(env, staff), qs = await qualsFor(env, staff.map(u => u.email)), phs = await photoSet(env, staff.map(u => u.email));
+    return json(staff.map(u => ({ ...u, has_photo: phs.has(u.email), quals: qs[u.email], checks: ch[u.email], training: tr[u.email], blockers: blockers(u, ch[u.email], tr[u.email], null), expiring: expiringFor(ch[u.email], today) })));
   }
 
   if (p === "/api/users" && method === "GET") {
@@ -565,6 +700,46 @@ async function api(req, env, url) {
       training_name=excluded.training_name, active=excluded.active, notes=excluded.notes`)
       .bind(email, name, r, clientId, clean(b.phone, 30) || null, pay, clean(b.training_name, 100) || null, active, cleanMulti(b.notes, 1000) || null, nowIso()).run();
     await audit(env, me.email, before ? "user_update" : "user_add", email, { name, role: r, client_id: clientId, pay_rate: pay, active });
+    return json({ ok: true });
+  }
+
+  if ((m = /^\/api\/users\/([^/]+)\/email$/.exec(p)) && method === "POST") {
+    const from = decodeURIComponent(m[1]).toLowerCase(), b = await body(), to = String(b.email || "").trim().toLowerCase();
+    if (!validEmail(to)) bad("Enter a valid new email address.");
+    const u = await env.DB.prepare("SELECT * FROM users WHERE email=?").bind(from).first();
+    if (!u) return fail(404, "That person doesn't exist.");
+    if (u.role === "owner" && role !== "owner") bad("Only the owner can change an owner's email.");
+    if (from === me.email) bad("You can't change your own sign-in email here. Ask another owner.");
+    if (await env.DB.prepare("SELECT 1 FROM users WHERE email=?").bind(to).first()) bad("Someone already uses that email address.");
+    await env.DB.batch([
+      env.DB.prepare("PRAGMA defer_foreign_keys = on"),
+      env.DB.prepare("UPDATE users SET email=? WHERE email=?").bind(to, from),
+      env.DB.prepare("UPDATE checks SET email=? WHERE email=?").bind(to, from),
+      env.DB.prepare("UPDATE quals SET email=? WHERE email=?").bind(to, from),
+      env.DB.prepare("UPDATE photos SET email=? WHERE email=?").bind(to, from),
+      env.DB.prepare("UPDATE shifts SET worker_email=? WHERE worker_email=?").bind(to, from),
+      env.DB.prepare("UPDATE shifts SET requested_by=? WHERE requested_by=?").bind(to, from),
+      env.DB.prepare("UPDATE shifts SET offered_to=REPLACE(offered_to, ?, ?) WHERE offered_to LIKE ?").bind(JSON.stringify(from), JSON.stringify(to), `%${from}%`),
+    ]);
+    await audit(env, me.email, "user_email_change", to, { from, to });
+    return json({ ok: true, email: to });
+  }
+  if ((m = /^\/api\/users\/([^/]+)$/.exec(p)) && method === "DELETE") {
+    const email = decodeURIComponent(m[1]).toLowerCase();
+    const u = await env.DB.prepare("SELECT * FROM users WHERE email=?").bind(email).first();
+    if (!u) return fail(404, "That person doesn't exist.");
+    if (email === me.email) bad("You can't delete yourself.");
+    if (u.role === "owner") bad("Owners can't be deleted here.");
+    const worked = await env.DB.prepare("SELECT COUNT(*) n FROM shifts WHERE worker_email=? AND status IN ('filled','pending')").bind(email).first();
+    if (worked.n) bad(`${u.name} has ${worked.n} booked or worked shift${worked.n > 1 ? "s" : ""} on record, which must be kept for timesheets, invoices and audit. Untick Active instead, so they can't sign in or be booked. Unassign any future shifts first.`);
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM documents WHERE check_id IN (SELECT id FROM checks WHERE email=?)").bind(email),
+      env.DB.prepare("DELETE FROM checks WHERE email=?").bind(email),
+      env.DB.prepare("DELETE FROM quals WHERE email=?").bind(email),
+      env.DB.prepare("DELETE FROM photos WHERE email=?").bind(email),
+      env.DB.prepare("DELETE FROM users WHERE email=?").bind(email),
+    ]);
+    await audit(env, me.email, "user_delete", email, { name: u.name, role: u.role });
     return json({ ok: true });
   }
 

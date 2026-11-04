@@ -39,7 +39,7 @@ let me = null, view = null, cache = {};
 const isAdmin = () => me && (me.role === "owner" || me.role === "coordinator");
 const TABS = {
   staff: [["shifts", "My shifts"], ["hours", "My hours"], ["checks", "My checks"]],
-  manager: [["shifts", "Our shifts"], ["request", "Request cover"], ["hours", "Sign off hours"]],
+  manager: [["shifts", "Our shifts"], ["staff", "Our staff"], ["request", "Request cover"], ["hours", "Sign off hours"]],
   admin: [["today", "Today"], ["shifts", "Shifts"], ["staff", "Staff"], ["nurseries", "Nurseries"], ["billing", "Hours & billing"], ["settings", "Settings"]],
 };
 const tabsFor = () => TABS[isAdmin() ? "admin" : me.role];
@@ -59,6 +59,8 @@ async function boot() {
 // Refresh the current view when the person comes back to the tab, and every 2 minutes while it's open,
 // so new bookings and sign-offs appear without a manual reload (skipped while a form/drawer is open).
 const LIST_VIEWS = ["shifts", "hours", "checks", "today", "staff", "nurseries"];
+const declinedHtml = s => s.declined?.length ? `<div class="note">Declined by ${s.declined.map(d => esc(d.name) + (d.reason ? ` (“${esc(d.reason)}”)` : "")).join(", ")}</div>` : "";
+const expiringHtml = list => list?.length ? `<div class="callout"><b>Training and certificates to renew:</b><ul class="blk" style="color:inherit">${list.map(x => `<li>${esc(x.label)}: ${x.expired ? "<b>expired</b> " : "expires "}${fullDate(x.expires_on)}</li>`).join("")}</ul></div>` : "";
 const refreshIfIdle = () => { if (me && LIST_VIEWS.includes(view) && document.visibilityState === "visible" && !$("#drawer-root").innerHTML && !document.activeElement?.matches("input,textarea,select")) render(); };
 document.addEventListener("visibilitychange", refreshIfIdle);
 setInterval(refreshIfIdle, 120000);
@@ -91,7 +93,7 @@ function setDrawer(html, wire) { $("#dbody").innerHTML = html; if (wire) wire($(
 
 /* ---------- shared pieces ---------- */
 const STATUS = {
-  requested: ["Requested", "warn"], open: ["Offered to staff", "info"], filled: ["Booked", "ok"], cancelled: ["Cancelled", ""],
+  requested: ["Requested", "warn"], open: ["Offered to staff", "info"], pending: ["Waiting for worker to confirm", "warn"], filled: ["Booked", "ok"], cancelled: ["Cancelled", ""],
 };
 const TS = { none: null, submitted: ["Hours submitted", "warn"], approved: ["Hours approved", "ok"], queried: ["Hours queried", "bad"] };
 const pill = ([t, c]) => `<span class="pill ${c}">${esc(t)}</span>`;
@@ -116,7 +118,7 @@ function checkForm(email, type, c, admin, user) {
   <form id="ckf"><div class="form-grid">
     <label class="fld" for="ck_ref">${esc(def.refLabel)}<input type="text" id="ck_ref" value="${esc(c?.ref)}"></label>
     ${def.issued ? `<label class="fld" for="ck_iss">Issue date<input type="date" id="ck_iss" value="${esc(c?.issued_on)}"></label>` : ""}
-    ${def.expires ? `<label class="fld" for="ck_exp">${type === "rtw" ? "Permission ends (blank if no time limit)" : "Expiry date"}<input type="date" id="ck_exp" value="${esc(c?.expires_on)}"></label>` : ""}
+    ${def.expires ? `<label class="fld" for="ck_exp">${type === "rtw" ? "Permission ends (blank if no time limit)" : "Expiry / renewal date"}<input type="date" id="ck_exp" value="${esc(c?.expires_on)}"><span class="note" id="ck_exp_hint" style="font-weight:400">${def.years ? `Usually valid ${def.years} year${def.years > 1 ? "s" : ""}.` : ""}</span></label>` : ""}
     ${type === "dbs" ? `<label class="fld" for="ck_lsc">Last Update Service status check<input type="date" id="ck_lsc" value="${esc(d.last_status_check)}"></label>` : ""}
     ${type === "rtw" && admin ? `<label class="fld" for="ck_whl">Weekly hours limit (e.g. 20 on a Student visa in term time)<input type="number" id="ck_whl" min="1" max="60" value="${esc(d.weekly_hours_limit)}"></label>` : ""}
     ${type === "qual" && admin ? `<label class="fld" for="ck_lvl">Level<select id="ck_lvl">${[[0, "Not relevant / below Level 2"], [2, "Level 2"], [3, "Level 3 (full and relevant)"], [6, "Level 6 / QTS / EYTS"]].map(([v, l]) => `<option value="${v}" ${(user?.qual_level || 0) === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>` : ""}
@@ -154,6 +156,13 @@ function wireCheckForm(root, email, type, admin, after) {
     });
   };
   loadDocs().catch(e => root.querySelector("#ck_docs").textContent = e.message);
+  const iss = root.querySelector("#ck_iss"), exp = root.querySelector("#ck_exp"), yrs = me.checkTypes[type].years;
+  if (iss && exp && yrs) iss.addEventListener("change", () => {
+    if (!iss.value || exp.dataset.touched) return;
+    const d = new Date(iss.value + "T12:00:00Z"); d.setUTCFullYear(d.getUTCFullYear() + yrs); exp.value = d.toISOString().slice(0, 10);
+    root.querySelector("#ck_exp_hint").textContent = `Filled in as ${yrs} year${yrs > 1 ? "s" : ""} after the issue date. Change it if the certificate says otherwise.`;
+  });
+  if (exp) exp.addEventListener("input", () => exp.dataset.touched = 1);
   root.querySelector("#ckf").onsubmit = async e => {
     e.preventDefault();
     const g = id => root.querySelector("#" + id);
@@ -178,14 +187,83 @@ function wireCheckForm(root, email, type, admin, after) {
   };
 }
 
+function checkRows(checks, btn) {
+  const row = ([k, def]) => `<div class="check-row"><div><b>${esc(def.label)}</b>${def.required ? "" : ` <span class="note">(optional, needed for some shifts)</span>`}<div>${checkStatusPill(checks[k], def, me.today)}${checks[k]?.docs ? ` <span class="note">${checks[k].docs} document${checks[k].docs > 1 ? "s" : ""}</span>` : ""}</div></div>${btn(k)}</div>`;
+  const all = Object.entries(me.checkTypes);
+  return `<h3>Vetting checks</h3>${all.filter(([, d]) => d.group === "vetting").map(row).join("")}
+    <h3>Core training (required)</h3>${all.filter(([, d]) => d.core).map(row).join("")}
+    <h3>Qualifications &amp; other training</h3>${all.filter(([, d]) => d.group === "training" && !d.core).map(row).join("")}`;
+}
+// Headshot: shown to RSS and to nurseries the person is booked with, so the nursery can confirm who arrives.
+const initials = n => String(n || "?").split(/\s+/).map(w => w[0]).slice(0, 2).join("").toUpperCase();
+const avatar = (src, name, size = 56) => src ? `<img src="${esc(src)}" alt="Photo of ${esc(name)}" class="avatar" style="width:${size}px;height:${size}px" onerror="this.outerHTML='<span class=&quot;avatar ph&quot; style=&quot;width:${size}px;height:${size}px;font-size:${Math.round(size / 2.6)}px&quot;>${esc(initials(name))}</span>'">`
+  : `<span class="avatar ph" style="width:${size}px;height:${size}px;font-size:${Math.round(size / 2.6)}px" aria-hidden="true">${esc(String(name || "?").split(/\s+/).map(w => w[0]).slice(0, 2).join("").toUpperCase())}</span>`;
+function photoBlock(email, name, has, canEdit, after) {
+  const src = has ? `/api/photo/${encodeURIComponent(email)}?v=${Date.now()}` : null;
+  return `<div class="photo-row">${avatar(src, name, 88)}<div>${canEdit ? `<label class="btn ghost sm" for="ph_file" style="cursor:pointer">${has ? "Change photo" : "Add headshot"}</label><input type="file" id="ph_file" accept="image/*" capture="user" hidden>
+    ${has ? `<button class="link-btn danger" id="ph_del">Remove</button>` : ""}<div class="note">A clear, recent head-and-shoulders photo. Nurseries see it on the day so they know who to expect.</div><p class="err" id="ph_err"></p>` : ""}</div></div>`;
+}
+function wirePhoto(root, email, after) {
+  const f = root.querySelector("#ph_file"); if (!f) return;
+  f.onchange = async () => {
+    const file = f.files[0]; if (!file) return; const err = root.querySelector("#ph_err"); err.textContent = "Uploading…";
+    try {
+      const img = await createImageBitmap(file), side = Math.min(img.width, img.height), cv = document.createElement("canvas"); cv.width = cv.height = 480;
+      cv.getContext("2d").drawImage(img, (img.width - side) / 2, Math.max(0, (img.height - side) / 3), side, side, 0, 0, 480, 480);
+      const blob = await new Promise(r => cv.toBlob(r, "image/jpeg", 0.85));
+      await api(`/api/photo/${encodeURIComponent(email)}`, { method: "PUT", body: blob, headers: { "content-type": "image/jpeg" } });
+      toast("Photo saved"); after();
+    } catch (e) { err.textContent = e.message || "Couldn't read that photo. Try a JPG or PNG."; }
+  };
+  const d = root.querySelector("#ph_del"); if (d) d.onclick = async () => { if (await act(d, () => api(`/api/photo/${encodeURIComponent(email)}`, { method: "DELETE" }))) { toast("Photo removed"); after(); } };
+}
+const QSTAT = { completed: ["Completed", "ok"], in_progress: ["In progress", "info"] };
+function qualRows(quals, canEdit) {
+  return `<h3>Academic &amp; professional qualifications</h3>${quals.length ? quals.map(q => `<div class="check-row"><div><b>${esc(q.level)} ${esc(q.subject)}</b>
+    <div class="note">${esc(q.institution || "")}${q.year ? (q.institution ? " · " : "") + (q.status === "completed" ? "Completed " : "Expected ") + esc(q.year) : ""}</div>
+    <div>${pill(QSTAT[q.status])} ${q.verified ? pill(["Checked by RSS", "ok"]) : pill(["Not yet checked", ""])}</div></div>
+    ${canEdit ? `<button class="btn ghost sm" data-qual="${q.id}">Edit</button>` : ""}</div>`).join("") : `<p class="empty">None added yet.</p>`}
+    ${canEdit ? `<button class="btn ghost sm" data-qual="new">+ Add qualification</button>` : ""}`;
+}
+function qualDrawer(email, q, admin, after) {
+  q = q || { status: "completed" };
+  openDrawer(`<p class="eyebrow">Qualification</p><h2>${q.id ? "Edit qualification" : "Add a qualification"}</h2>
+  <div class="form-grid">
+    <label class="fld" for="q_lvl">Level<select id="q_lvl"><option value="">Choose…</option>${me.qualLevels.map(l => `<option ${q.level === l ? "selected" : ""}>${esc(l)}</option>`).join("")}</select></label>
+    <label class="fld" for="q_sub">Subject<input type="text" id="q_sub" value="${esc(q.subject)}" placeholder="e.g. Early Childhood Studies"></label>
+    <label class="fld" for="q_inst">University / college<input type="text" id="q_inst" value="${esc(q.institution)}"></label>
+    <label class="fld" for="q_st">Status<select id="q_st"><option value="completed" ${q.status === "completed" ? "selected" : ""}>Completed</option><option value="in_progress" ${q.status === "in_progress" ? "selected" : ""}>In progress (studying now)</option></select></label>
+    <label class="fld" for="q_yr"><span id="q_yrl">${q.status === "in_progress" ? "Expected completion year" : "Year completed"}</span><input type="text" id="q_yr" inputmode="numeric" maxlength="4" value="${esc(q.year)}" placeholder="2025"></label>
+  </div>
+  ${admin ? `<label class="opt" for="q_ver"><input type="checkbox" id="q_ver" ${q.verified ? "checked" : ""}><span>I've seen the certificate or proof of enrolment</span></label>` : `<p class="note">RSS will check your certificate or proof of enrolment. Upload it under Childcare qualification if you're asked to.</p>`}
+  <p class="err" id="q_err"></p><div class="row"><button class="btn" id="q_go">Save</button>${q.id ? `<button class="link-btn danger" id="q_del">Remove</button>` : ""}</div>`, root => {
+    const g = id => root.querySelector("#" + id);
+    g("q_st").onchange = () => g("q_yrl").textContent = g("q_st").value === "in_progress" ? "Expected completion year" : "Year completed";
+    g("q_go").onclick = async () => {
+      const b = { level: g("q_lvl").value, subject: g("q_sub").value, institution: g("q_inst").value, status: g("q_st").value, year: g("q_yr").value, verified: admin ? g("q_ver").checked : false };
+      const path = q.id ? `/api/quals/${q.id}` : `/api/staff/${encodeURIComponent(email)}/quals`;
+      if (await act(g("q_go"), () => api(path, { method: q.id ? "PUT" : "POST", body: b }), g("q_err"))) { toast("Saved"); after(); }
+    };
+    if (g("q_del")) g("q_del").onclick = async () => {
+      const d = g("q_del"); if (!d.dataset.armed) { d.dataset.armed = 1; d.textContent = "Click again to remove"; return; }
+      if (await act(d, () => api(`/api/quals/${q.id}`, { method: "DELETE" }), g("q_err"))) { toast("Removed"); after(); }
+    };
+  });
+}
+
 /* =====================================================================
    STAFF
    ===================================================================== */
 const STAFF = {
   async shifts() {
     const [open, mine] = await Promise.all([api("/api/open-shifts"), api(`/api/shifts?from=${me.today}`)]);
-    const upcoming = mine.filter(s => s.status === "filled");
+    const upcoming = mine.filter(s => s.status === "filled"), toConfirm = mine.filter(s => s.status === "pending");
     $("#app").innerHTML = `
+    ${expiringHtml(me.expiring)}
+    ${toConfirm.length ? `<div class="section-h"><h2>Please confirm</h2></div><p class="note" style="margin-top:-6px">RSS has asked you to work these shifts. Accept or decline so the nursery knows.</p>
+    <div class="cards">${toConfirm.map(s => `<div class="card attn"><div class="section-h" style="margin:0"><h4>${esc(s.client_name)}</h4>${shiftWhen(s)}</div>
+      <div class="meta">${shiftReqs(s)} · ${hrs(s.mins)}</div>${s.notes ? `<div class="note">${esc(s.notes)}</div>` : ""}
+      <div class="row" style="margin-top:6px"><button class="btn sm" data-confirm="${s.id}">Accept</button><button class="btn ghost sm" data-decline="${s.id}">Decline</button><span class="err" id="ce${s.id}"></span></div></div>`).join("")}</div>` : ""}
     ${me.blockers.length ? `<div class="callout"><b>You can't be booked yet.</b> Still needed: ${esc(me.blockers.join("; "))}. <button class="link-btn" id="toChecks">Go to My checks</button></div>` : ""}
     <div class="section-h"><h2>Shifts you can take</h2></div>
     <div class="cards">${open.length ? open.map(s => `<div class="card ${s.blockers.length ? "" : "attn"}">
@@ -198,6 +276,17 @@ const STAFF = {
       <div class="meta">${shiftReqs(s)} · ${hrs(s.mins)} · Pay ${gbp(s.pay_rate)}/h</div>${s.notes ? `<div class="note">${esc(s.notes)}</div>` : ""}</div>`).join("") : `<p class="empty">Nothing booked yet.</p>`}</div>
     <p class="note" style="margin-top:20px">Can't make a booked shift? Call RSS straight away. Don't contact the nursery's parent line or just not turn up.</p>`;
     const tc = $("#toChecks"); if (tc) tc.onclick = () => go("checks");
+    $$("[data-confirm]").forEach(b => b.onclick = async () => {
+      if (await act(b, () => api(`/api/shifts/${b.dataset.confirm}/accept`, { method: "POST", body: {} }), $("#ce" + b.dataset.confirm))) { toast("Confirmed. The nursery can now see you're coming."); render(); }
+    });
+    $$("[data-decline]").forEach(b => b.onclick = () => {
+      const s = toConfirm.find(x => x.id == b.dataset.decline);
+      openDrawer(`<p class="eyebrow">Decline shift</p><h2>${esc(s.client_name)}</h2><p>${shiftWhen(s)}</p>
+        <label class="fld" for="dc_r">Reason (optional, helps RSS rebook)<input type="text" id="dc_r" style="max-width:none" placeholder="e.g. Lecture that morning"></label>
+        <p class="err" id="dc_e"></p><div class="row"><button class="btn warn" id="dc_go">Decline this shift</button></div>`, root => {
+        root.querySelector("#dc_go").onclick = async () => { if (await act(root.querySelector("#dc_go"), () => api(`/api/shifts/${s.id}/decline`, { method: "POST", body: { reason: fieldVal(root, "dc_r") } }), root.querySelector("#dc_e"))) { closeDrawer(); toast("Declined. RSS will find someone else."); render(); } };
+      });
+    });
     $$("[data-accept]").forEach(b => b.onclick = async () => {
       const ok = await act(b, () => api(`/api/shifts/${b.dataset.accept}/accept`, { method: "POST", body: {} }), $("#ae" + b.dataset.accept));
       if (ok) { toast("Shift booked. It's in your upcoming shifts."); render(); }
@@ -219,12 +308,15 @@ const STAFF = {
   async checks() {
     me = await api("/api/me");
     const t = me.training || {};
-    $("#app").innerHTML = `<div class="panel"><p class="eyebrow">My checks</p><h2>${me.blockers.length ? "Not ready to book yet" : "Ready to work"}</h2>
+    $("#app").innerHTML = `<div class="panel"><p class="eyebrow">My checks</p>${photoBlock(me.email, me.name, me.has_photo, true)}<h2>${me.blockers.length ? "Not ready to book yet" : "Ready to work"}</h2>
     ${me.blockers.length ? `<p>Still needed:</p><ul class="blk">${me.blockers.map(b => `<li>${esc(b)}</li>`).join("")}</ul>` : `<p class="note">All required checks are verified. Keep your first aid and other certificates in date.</p>`}
     <div class="check-row"><div><b>Childcare 101 training</b><div class="note">${t.found ? `${t.passed} of ${t.total} modules passed${t.declaredAt ? ", declaration signed" : ""}` : "Not started, or your name on the training doesn't match. Use the same full name on both."}</div></div>
       ${t.complete ? pill(["Complete", "ok"]) : `<a class="btn sm" href="https://rss-training.ruth-d53.workers.dev" target="_blank" rel="noopener">Open training</a>`}</div>
-    ${Object.entries(me.checkTypes).map(([k, def]) => `<div class="check-row"><div><b>${esc(def.label)}</b>${def.required ? "" : ` <span class="note">(optional, needed for some shifts)</span>`}<div>${checkStatusPill(me.checks[k], def, me.today)}</div></div>
-      <button class="btn ghost sm" data-ck="${k}">${me.checks[k] ? "View / update" : "Add"}</button></div>`).join("")}</div>`;
+    ${expiringHtml(me.expiring)}
+    ${checkRows(me.checks, k => `<button class="btn ghost sm" data-ck="${k}">${me.checks[k] ? "View / update" : "Add"}</button>`)}
+    ${qualRows(me.quals, true)}</div>`;
+    wirePhoto($("#app"), me.email, () => render());
+    $$("[data-qual]").forEach(b => b.onclick = () => qualDrawer(me.email, me.quals.find(q => q.id == b.dataset.qual), false, () => { closeDrawer(); render(); }));
     $$("[data-ck]").forEach(b => b.onclick = () => openDrawer(checkForm(me.email, b.dataset.ck, me.checks[b.dataset.ck], false), root => wireCheckForm(root, me.email, b.dataset.ck, false, () => { closeDrawer(); render(); })));
   },
 };
@@ -255,10 +347,23 @@ function timesheetDrawer(s) {
 function assuranceHtml(a) {
   if (!a) return "";
   const yes = (ok, t) => `<span class="pill ${ok ? "ok" : "bad"}">${t}</span>`;
+  const top = a.quals?.find(q => q.status === "completed") || a.quals?.[0];
   return `<div class="meta" style="gap:6px">${yes(!!a.dbs, a.dbs ? `Enhanced DBS ✓${a.dbs.update_service ? " (Update Service)" : ""}` : "DBS not verified")}
-    ${yes(a.rtw, "Right to work")} ${yes(a.refs, "2 references")} ${yes(a.id, "ID seen")} ${yes(a.training, "RSS Childcare 101")}
-    ${a.qual_level ? `<span class="pill info">Level ${a.qual_level}</span>` : `<span class="pill">Unqualified</span>`}
-    ${a.pfa_expires ? `<span class="pill ok">Paediatric first aid${a.pfa_expires !== "verified" ? " to " + fullDate(a.pfa_expires) : ""}</span>` : `<span class="pill">No PFA</span>`}</div>`;
+    ${yes(a.rtw, "Right to work")} ${yes(a.refs, "2 references")} ${yes(a.id, "ID seen")} ${yes(a.childcare101, "RSS Childcare 101")}
+    ${a.qual_level ? `<span class="pill info">Childcare Level ${a.qual_level}</span>` : `<span class="pill">No childcare qualification</span>`}
+    ${a.pfa_expires ? `<span class="pill ok">Paediatric first aid${a.pfa_expires !== "verified" ? " to " + fullDate(a.pfa_expires) : ""}</span>` : `<span class="pill">No PFA</span>`}
+    ${top ? `<span class="pill info">${esc(top.level)} ${esc(top.subject)}${top.status === "in_progress" ? " (in progress)" : ""}</span>` : ""}</div>`;
+}
+function profileHtml(a) {
+  const row = (label, val, ok) => `<div class="check-row"><div><b>${label}</b></div>${ok === undefined ? val : pill([val, ok === "info" ? "info" : ok ? "ok" : "bad"])}</div>`;
+  return `<h3>Vetting (checked by RSS)</h3>
+    ${row("Enhanced DBS with children's barred list", a.dbs ? `Verified${a.dbs.issued ? " · issued " + fullDate(a.dbs.issued) : ""}${a.dbs.update_service ? " · Update Service" : ""}` : "Not verified", !!a.dbs)}
+    ${row("Right to work", a.rtw ? "Verified" : "Not verified", a.rtw)}${row("Two references", a.refs ? "Verified" : "Not verified", a.refs)}${row("Photo ID", a.id ? "Seen" : "Not seen", a.id)}
+    ${row("RSS Childcare 101 induction", a.childcare101 ? "Completed" + (a.childcare101_at ? " " + fullDate(a.childcare101_at) : "") : "Not completed", a.childcare101)}
+    <h3>Childcare qualification</h3>${row(a.qual_level ? `Level ${a.qual_level}${a.qual_title ? " · " + esc(a.qual_title) : ""}` : "No verified childcare qualification", "")}
+    <h3>Training</h3>${a.training.length ? a.training.map(t => row(esc(t.label), t.expires ? (t.expires < me.today ? "Expired " : "Valid to ") + fullDate(t.expires) : "Verified", !t.expires || t.expires >= me.today)).join("") : `<p class="empty">No training recorded yet.</p>`}
+    <h3>Academic qualifications</h3>${a.quals.length ? a.quals.map(q => row(`${esc(q.level)} ${esc(q.subject)}${q.institution ? `<div class="note">${esc(q.institution)}</div>` : ""}`, `${q.status === "completed" ? "Completed" : "In progress"}${q.year ? " " + esc(q.year) : ""}`, q.status === "completed" ? true : "info")).join("") : `<p class="empty">None recorded.</p>`}
+    <p class="note">RSS keeps the documents behind these checks. Contact RSS if you need written confirmation.</p>`;
 }
 const MANAGER = {
   async shifts() {
@@ -268,12 +373,13 @@ const MANAGER = {
     <div class="cards">${up.length ? up.map(s => `<div class="card ${s.status === "filled" ? "ok" : "attn"}">
       <div class="section-h" style="margin:0">${shiftWhen(s)}${pill(STATUS[s.status])}</div>
       <div class="meta">${shiftReqs(s)}</div>
-      ${s.worker_name ? `<div><b>${esc(s.worker_name)}</b> is coming.</div>${assuranceHtml(s.assurance)}` : `<div class="note">RSS is finding someone for this shift.</div>`}
+      ${s.worker_name ? `<div style="display:flex;gap:12px;align-items:center">${avatar(s.assurance?.photo, s.worker_name, 52)}<div><b>${esc(s.worker_name)}</b> ${s.status === "pending" ? "has been asked and hasn't confirmed yet." : "is coming."} <button class="link-btn" data-prof="${s.id}">Full profile</button></div></div>${assuranceHtml(s.assurance)}` : `<div class="note">RSS is finding someone for this shift.</div>`}${declinedHtml(s)}
       <div class="row" style="margin-top:4px"><button class="link-btn danger" data-cancel="${s.id}">Cancel this shift</button></div></div>`).join("") : `<p class="empty">No cover booked. Use Request cover when you need someone.</p>`}</div>
     <div class="section-h" style="margin-top:28px"><h2>Last two weeks</h2></div>
     <div class="tbl"><table><thead><tr><th>Date</th><th>Worker</th><th>Hours</th><th>Timesheet</th></tr></thead><tbody>
     ${past.map(s => `<tr><td class="n">${dayName(s.date)}</td><td>${esc(s.worker_name)}</td><td class="n">${s.actMins != null ? hrs(s.actMins) : "–"}</td><td>${TS[s.ts_status] ? pill(TS[s.ts_status]) : pill(["Not submitted yet", ""])}</td></tr>`).join("") || `<tr><td colspan="4" class="empty">Nothing yet.</td></tr>`}</tbody></table></div>`;
     $("#newReq").onclick = () => go("request");
+    $$("[data-prof]").forEach(b => b.onclick = () => { const s = up.find(x => x.id == b.dataset.prof); openDrawer(`<p class="eyebrow">RSS worker</p>${avatar(s.assurance.photo, s.worker_name, 120)}<h2>${esc(s.worker_name)}</h2>${profileHtml(s.assurance)}`); });
     $$("[data-cancel]").forEach(b => b.onclick = () => cancelShift(b.dataset.cancel, b));
   },
   async request() {
@@ -287,6 +393,14 @@ const MANAGER = {
     };
   },
   async hours() { await signOffList(`/api/shifts?from=${shiftBack(90)}&to=${me.today}`); },
+  async staff() {
+    const list = await api("/api/our-staff");
+    $("#app").innerHTML = `<div class="section-h"><h2>RSS staff at ${esc(me.client.name)}</h2></div>
+    <p class="note" style="margin-top:-6px">Everyone RSS has booked with you in the last 6 months or coming up, with their checks, qualifications and training.</p>
+    <div class="cards">${list.length ? list.map((a, i) => `<div class="card"><div class="section-h" style="margin:0"><div style="display:flex;gap:12px;align-items:center">${avatar(a.photo, a.name, 52)}<h4>${esc(a.name)}</h4></div><span class="note">${a.next_date ? "Next: " + dayName(a.next_date) : a.last_date ? "Last: " + dayName(a.last_date) : ""}</span></div>
+      ${assuranceHtml(a)}<div class="row" style="margin-top:4px"><button class="btn ghost sm" data-full="${i}">Full profile</button></div></div>`).join("") : `<p class="empty">No RSS staff booked with you yet.</p>`}</div>`;
+    $$("[data-full]").forEach(b => b.onclick = () => { const a = list[+b.dataset.full]; openDrawer(`<p class="eyebrow">RSS worker</p>${avatar(a.photo, a.name, 120)}<h2>${esc(a.name)}</h2>${profileHtml(a)}`); });
+  },
 };
 function shiftFormHtml(s, { count = false, clients = null } = {}) {
   return `<div class="form-grid">
@@ -339,16 +453,16 @@ async function signOffList(path) {
 const ADMIN = {
   async today() {
     const d = await api("/api/dashboard");
-    cache.counts = { shifts: d.requested + d.open || 0, billing: d.awaiting || 0, staff: d.pendingChecks || 0 }; renderTabs(cache.counts);
+    cache.counts = { shifts: d.requested + d.open + d.pending || 0, billing: d.awaiting || 0, staff: d.pendingChecks || 0 }; renderTabs(cache.counts);
     const card = (n, l, to, attn) => `<button class="stat-card ${attn && n ? "attn" : ""}" data-go="${to}"><b>${n}</b><span>${l}</span></button>`;
     $("#app").innerHTML = `<div class="stat-grid">
-      ${card(d.requested, "cover requests to fill", "shifts", 1)}${card(d.open, "offered, not yet taken", "shifts", 1)}${card(d.next7, "booked in the next 7 days", "shifts")}
+      ${card(d.requested, "cover requests to fill", "shifts", 1)}${card(d.open, "offered, not yet taken", "shifts", 1)}${card(d.pending, "waiting for staff to confirm", "shifts", 1)}${card(d.next7, "booked in the next 7 days", "shifts")}
       ${card(d.toSubmit, "past shifts with no hours yet", "billing", 1)}${card(d.awaiting, "hours waiting for nursery sign-off", "billing")}${card(d.queried, "hours queried", "billing", 1)}
       ${card(d.toInvoice, "approved shifts not yet invoiced", "billing", 1)}${card(d.pendingChecks, "documents waiting for your check", "staff", 1)}${card(`${d.readyCount}/${d.staffCount}`, "staff ready to book", "staff")}
     </div>
     <div class="grid2" style="margin-top:24px">
       <div class="panel"><h3 style="margin-top:0">Not ready to book</h3>${d.notReady.length ? d.notReady.map(u => `<div class="check-row"><div><b>${esc(u.name)}</b><ul class="blk">${u.blockers.map(b => `<li>${esc(b)}</li>`).join("")}</ul></div><button class="btn ghost sm" data-staff="${esc(u.email)}">Open</button></div>`).join("") : `<p class="empty">Everyone is ready.</p>`}</div>
-      <div class="panel"><h3 style="margin-top:0">Expiring in the next 30 days</h3>${d.expiring.length ? d.expiring.map(x => `<div class="check-row"><div><b>${esc(x.name)}</b><div class="note">${esc(x.label)} · ${fullDate(x.expires_on)}</div></div><button class="btn ghost sm" data-staff="${esc(x.email)}">Open</button></div>`).join("") : `<p class="empty">Nothing expiring soon.</p>`}</div>
+      <div class="panel"><h3 style="margin-top:0">Training &amp; certificates expired or due in 30 days</h3>${d.expiring.length ? d.expiring.map(x => `<div class="check-row"><div><b>${esc(x.name)}</b><div class="note">${esc(x.label)} · ${x.expired ? "<b style='color:var(--bad)'>expired</b> " : ""}${fullDate(x.expires_on)}</div></div><button class="btn ghost sm" data-staff="${esc(x.email)}">Open</button></div>`).join("") : `<p class="empty">Nothing expiring soon.</p>`}</div>
     </div>`;
     $$("[data-go]").forEach(b => b.onclick = () => go(b.dataset.go));
     $$("[data-staff]").forEach(b => b.onclick = () => staffDrawer(b.dataset.staff));
@@ -359,11 +473,11 @@ const ADMIN = {
     const [list, clients] = await Promise.all([api(`/api/shifts?from=${f.show === "past" ? shiftBack(60) : f.show === "action" || f.show === "upcoming" ? me.today : shiftBack(14)}&to=${f.show === "past" ? me.today : ""}${f.client ? "&client=" + f.client : ""}`), api("/api/clients")]);
     cache.clients = clients;
     let rows = list;
-    if (f.show === "action") rows = list.filter(s => s.status === "requested" || s.status === "open");
+    if (f.show === "action") rows = list.filter(s => s.status === "requested" || s.status === "open" || s.status === "pending");
     if (f.show === "upcoming") rows = list.filter(s => s.status === "filled");
     if (f.show === "past") rows = list.filter(s => s.date < me.today).reverse();
     $("#app").innerHTML = `<div class="section-h"><div class="filters">
-      <select id="f_show" aria-label="Show">${[["action", "Needs filling"], ["upcoming", "Booked, upcoming"], ["all", "Everything"], ["past", "Past 60 days"]].map(([v, l]) => `<option value="${v}" ${f.show === v ? "selected" : ""}>${l}</option>`).join("")}</select>
+      <select id="f_show" aria-label="Show">${[["action", "Needs filling or confirming"], ["upcoming", "Booked, upcoming"], ["all", "Everything"], ["past", "Past 60 days"]].map(([v, l]) => `<option value="${v}" ${f.show === v ? "selected" : ""}>${l}</option>`).join("")}</select>
       <select id="f_client" aria-label="Nursery"><option value="">All nurseries</option>${clients.map(c => `<option value="${c.id}" ${f.client == c.id ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select></div>
       <button class="btn" id="newShift" ${clients.length ? "" : "disabled title='Add a nursery first'"}>New shift</button></div>
     ${clients.length ? "" : `<div class="callout">Add your nurseries first, in the Nurseries tab.</div>`}
@@ -389,12 +503,12 @@ const ADMIN = {
     const rows = list.filter(u => f === "all" || (f === "active" ? u.active : f === "notready" ? u.active && u.blockers.length : f === "pending" ? Object.values(u.checks).some(c => c.status === "pending") : !u.active));
     $("#app").innerHTML = `<div class="section-h"><div class="filters"><select id="f_st" aria-label="Show">${[["active", "Active staff"], ["notready", "Not ready to book"], ["pending", "Documents to check"], ["inactive", "Inactive"], ["all", "Everyone"]].map(([v, l]) => `<option value="${v}" ${f === v ? "selected" : ""}>${l}</option>`).join("")}</select></div>
       <button class="btn" id="addStaff">Add staff member</button></div>
-    <div class="tbl"><table><thead><tr><th>Name</th><th>Status</th><th>DBS</th><th>RTW</th><th>Refs</th><th>Training</th><th>Level</th><th>PFA</th><th>Pay</th></tr></thead><tbody>
+    <div class="tbl"><table><thead><tr><th>Name</th><th>Status</th><th>DBS</th><th>RTW</th><th>Refs</th><th>Training</th><th>Level</th><th>PFA</th><th>Renewals</th><th>Pay</th></tr></thead><tbody>
     ${rows.map(u => { const c = u.checks, v = t => c[t]?.status === "verified" ? "✓" : c[t]?.status === "pending" ? "…" : "✗";
-      return `<tr style="cursor:pointer" data-staff="${esc(u.email)}"><td><b>${esc(u.name)}</b><div class="note">${esc(u.email)}</div></td>
+      return `<tr style="cursor:pointer" data-staff="${esc(u.email)}"><td><div style="display:flex;gap:10px;align-items:center">${avatar(u.has_photo ? `/api/photo/${encodeURIComponent(u.email)}` : null, u.name, 36)}<div><b>${esc(u.name)}</b><div class="note">${esc(u.email)}</div></div></div></td>
       <td>${!u.active ? pill(["Inactive", ""]) : u.blockers.length ? pill(["Not ready", "bad"]) : pill(["Ready", "ok"])}</td>
       <td>${v("dbs")}</td><td>${v("rtw")}</td><td>${v("ref1")}${v("ref2")}</td><td>${u.training?.complete ? "✓" : `${u.training?.passed || 0}/${u.training?.total || 0}`}</td>
-      <td>${c.qual?.status === "verified" && u.qual_level ? "L" + u.qual_level : "–"}</td><td class="n">${c.pfa?.status === "verified" ? fullDate(c.pfa.expires_on) : "–"}</td><td class="n">${u.pay_rate != null ? gbp(u.pay_rate) : "–"}</td></tr>`; }).join("") || `<tr><td colspan="9" class="empty">No staff yet. Add your first RSS worker.</td></tr>`}</tbody></table></div>
+      <td>${c.qual?.status === "verified" && u.qual_level ? "L" + u.qual_level : "–"}</td><td class="n">${c.pfa?.status === "verified" ? fullDate(c.pfa.expires_on) : "–"}</td><td>${u.expiring.length ? pill([u.expiring.some(x => x.expired) ? `${u.expiring.length} due / expired` : `${u.expiring.length} due soon`, u.expiring.some(x => x.expired) ? "bad" : "warn"]) : "–"}</td><td class="n">${u.pay_rate != null ? gbp(u.pay_rate) : "–"}</td></tr>`; }).join("") || `<tr><td colspan="10" class="empty">No staff yet. Add your first RSS worker.</td></tr>`}</tbody></table></div>
     <p class="note">✓ verified · … uploaded, waiting for your check · ✗ missing. Click a person to open their file.</p>`;
     $("#f_st").onchange = e => { cache.staffFilter = e.target.value; render(); };
     $("#addStaff").onclick = () => userDrawer({ role: "staff", active: 1 });
@@ -490,9 +604,13 @@ async function shiftDrawer(id) {
   const clients = cache.clients || await api("/api/clients");
   const ready = (s.candidates || []).filter(c => !c.blockers.length), notReady = (s.candidates || []).filter(c => c.blockers.length);
   const unfilled = s.status === "requested" || s.status === "open";
+  const pendingHtml = s.status === "pending" ? `<div class="panel" style="padding:16px"><b>${esc(s.worker_name)}</b> has been asked to work this shift and hasn't confirmed yet${s.assigned_at ? ` (asked ${new Date(s.assigned_at).toLocaleString("en-GB", { dateStyle: "short", timeStyle: "short" })})` : ""}.
+     <div class="note">${esc(s.worker_email)}${s.worker_phone ? " · " + esc(s.worker_phone) : ""}. It's on their My shifts page to accept or decline.</div>
+     <div class="row" style="margin-top:8px"><button class="btn ghost sm" id="sd_un">Withdraw and ask someone else</button></div><p class="err" id="sd_err1"></p></div>` : "";
   setDrawer(`<p class="eyebrow">Shift #${s.id} · ${pill(STATUS[s.status])} ${TS[s.ts_status] ? pill(TS[s.ts_status]) : ""}</p>
   <h2>${esc(s.client_name)}</h2><p>${shiftWhen(s)} · ${hrs(s.mins)}</p>
   ${s.requested_by ? `<p class="note">Requested by ${esc(s.requested_by)} on ${fullDate(s.created_at)}.${s.cancelled_reason ? " Cancelled: " + esc(s.cancelled_reason) : ""}</p>` : ""}
+  ${pendingHtml}${declinedHtml(s)}
   ${s.status === "filled" ? `<div class="panel" style="padding:16px"><b>${esc(s.worker_name)}</b> <span class="note">${esc(s.worker_email)}${s.worker_phone ? " · " + esc(s.worker_phone) : ""}</span>
      <div class="meta">Pay ${gbp(s.pay_rate)}/h · Charge ${gbp(s.charge_rate)}/h</div>
      ${s.ts_status !== "none" ? `<div>Hours: ${s.act_start}–${s.act_finish}, ${s.act_break} min break = <b>${hrs(s.actMins)}</b>${s.ts_comment ? ` · <span class="note">${esc(s.ts_comment)}</span>` : ""}</div>` : ""}
@@ -502,7 +620,8 @@ async function shiftDrawer(id) {
      ${s.ts_status === "none" ? `<button class="btn ghost sm" id="sd_un">Unassign</button>` : ""}</div><p class="err" id="sd_err1"></p></div>` : ""}
   ${unfilled ? `<h3>Ready to work this shift (${ready.length})</h3>
     ${ready.length ? `<div class="cards">${ready.map(c => `<div class="check-row"><label class="opt" style="margin:0;border:0;padding:0" for="cand_${c.email}"><input type="checkbox" class="cand" id="cand_${c.email}" value="${esc(c.email)}"><span><b>${esc(c.name)}</b>${c.phone ? ` <span class="note">${esc(c.phone)}</span>` : ""}</span></label>
-      <button class="btn sm" data-assign="${esc(c.email)}">Book</button></div>`).join("")}</div>
+      <button class="btn sm" data-assign="${esc(c.email)}">Ask to work</button></div>`).join("")}</div>
+      <p class="note">"Ask to work" sends it to that person to accept or decline. "Offer" lets the first eligible person to accept take it.</p>
       <div class="row"><button class="btn ghost" id="sd_pub">${s.status === "open" ? "Re-offer" : "Offer"} to ticked staff</button><button class="btn ghost" id="sd_puball">Offer to all ${ready.length} ready staff</button></div>`
       : `<p class="empty">Nobody is eligible yet.</p>`}
     ${s.status === "open" ? `<p class="note">Currently offered to ${s.offered_to ? s.offered_to.length + " selected staff" : "all eligible staff"}. The first to accept gets it.</p>` : ""}
@@ -511,10 +630,10 @@ async function shiftDrawer(id) {
   ${s.status !== "cancelled" && !s.invoice_id ? `<h3>Edit shift</h3>${shiftFormHtml(s, { clients })}<p class="err" id="sd_err3"></p>
     <div class="row"><button class="btn" id="sd_save">Save changes</button>${s.ts_status === "none" ? `<button class="link-btn danger" id="sd_cancel">Cancel shift</button>` : ""}</div>` : ""}`, root => {
     const g = id => root.querySelector("#" + id), reopen = () => { render(); shiftDrawer(id); };
-    root.querySelectorAll("[data-assign]").forEach(b => b.onclick = async () => { if (await act(b, () => api(`/api/shifts/${id}/assign`, { method: "POST", body: { email: b.dataset.assign } }), g("sd_err2"))) { toast("Booked"); reopen(); } });
+    root.querySelectorAll("[data-assign]").forEach(b => b.onclick = async () => { if (await act(b, () => api(`/api/shifts/${id}/assign`, { method: "POST", body: { email: b.dataset.assign } }), g("sd_err2"))) { toast("Sent. Waiting for them to accept."); reopen(); } });
     root.querySelectorAll("[data-override]").forEach(b => b.onclick = async () => {
       if (!b.dataset.armed) { b.dataset.armed = 1; b.textContent = "Book despite missing checks? Click again"; return; }
-      if (await act(b, () => api(`/api/shifts/${id}/assign`, { method: "POST", body: { email: b.dataset.override, override: true } }), g("sd_err2"))) { toast("Booked (override logged)"); reopen(); }
+      if (await act(b, () => api(`/api/shifts/${id}/assign`, { method: "POST", body: { email: b.dataset.override, override: true } }), g("sd_err2"))) { toast("Sent to them to confirm (override logged)"); reopen(); }
     });
     if (g("sd_pub")) g("sd_pub").onclick = async () => {
       const picked = [...root.querySelectorAll(".cand:checked")].map(x => x.value);
@@ -522,7 +641,7 @@ async function shiftDrawer(id) {
       if (await act(g("sd_pub"), () => api(`/api/shifts/${id}/publish`, { method: "POST", body: { offered_to: picked } }), g("sd_err2"))) { toast("Offered. It's on their My shifts page."); reopen(); }
     };
     if (g("sd_puball")) g("sd_puball").onclick = async () => { if (await act(g("sd_puball"), () => api(`/api/shifts/${id}/publish`, { method: "POST", body: {} }), g("sd_err2"))) { toast("Offered to all eligible staff"); reopen(); } };
-    if (g("sd_un")) g("sd_un").onclick = async () => { if (await act(g("sd_un"), () => api(`/api/shifts/${id}/unassign`, { method: "POST", body: { reason: "Unassigned by RSS" } }), g("sd_err1"))) { toast("Unassigned; shift is open again"); reopen(); } };
+    if (g("sd_un")) g("sd_un").onclick = async () => { if (await act(g("sd_un"), () => api(`/api/shifts/${id}/unassign`, { method: "POST", body: { reason: "Unassigned by RSS" } }), g("sd_err1"))) { toast("Unassigned. The shift needs filling again."); reopen(); } };
     if (g("sd_appr")) g("sd_appr").onclick = async () => { if (await act(g("sd_appr"), () => api(`/api/shifts/${id}/approve`, { method: "POST", body: {} }), g("sd_err1"))) { toast("Approved"); reopen(); } };
     if (g("sd_ts")) g("sd_ts").onclick = () => { closeDrawer(); timesheetDrawer(s); };
     if (g("sd_save")) g("sd_save").onclick = async () => {
@@ -540,13 +659,16 @@ async function staffDrawer(email) {
   const list = await api("/api/staff"), u = list.find(x => x.email === email);
   if (!u) return setDrawer(`<p class="err">Not found.</p>`);
   const t = u.training || {};
-  setDrawer(`<p class="eyebrow">Staff file</p><h2>${esc(u.name)}</h2>
+  setDrawer(`<p class="eyebrow">Staff file</p>${photoBlock(u.email, u.name, u.has_photo, true)}<h2>${esc(u.name)}</h2>
   <p class="note">${esc(u.email)}${u.phone ? " · " + esc(u.phone) : ""} · Pay ${u.pay_rate != null ? gbp(u.pay_rate) + "/h" : "not set"} <button class="link-btn" id="sd_edit">Edit details</button></p>
   ${u.blockers.length ? `<div class="callout"><b>Can't be booked:</b><ul class="blk">${u.blockers.map(b => `<li>${esc(b)}</li>`).join("")}</ul></div>` : `<div class="callout exp"><b>Ready to book.</b></div>`}
   <div class="check-row"><div><b>Childcare 101 training</b><div class="note">${t.found ? `${t.passed} of ${t.total} modules passed${t.declaredAt ? ", declaration signed " + fullDate(t.declaredAt) : ""}` : `No training record found under "${esc(u.training_name || u.name)}". If they used a different name, set it under Edit details.`}</div></div>${t.complete ? pill(["Complete", "ok"]) : pill(["Not complete", "bad"])}</div>
-  ${Object.entries(me.checkTypes).map(([k, def]) => `<div class="check-row"><div><b>${esc(def.label)}</b>${def.required ? "" : ` <span class="note">(optional)</span>`}<div>${checkStatusPill(u.checks[k], def, me.today)}${u.checks[k]?.docs ? ` <span class="note">${u.checks[k].docs} document${u.checks[k].docs > 1 ? "s" : ""}</span>` : ""}</div></div>
-    <button class="btn ${u.checks[k]?.status === "pending" ? "" : "ghost"} sm" data-ck="${k}">${u.checks[k]?.status === "pending" ? "Check now" : "Open"}</button></div>`).join("")}`, root => {
+  ${expiringHtml(u.expiring)}
+  ${checkRows(u.checks, k => `<button class="btn ${u.checks[k]?.status === "pending" ? "" : "ghost"} sm" data-ck="${k}">${u.checks[k]?.status === "pending" ? "Check now" : "Open"}</button>`)}
+  ${qualRows(u.quals, true)}`, root => {
     root.querySelector("#sd_edit").onclick = () => userDrawer(u);
+    wirePhoto(root, email, () => { render(); staffDrawer(email); });
+    root.querySelectorAll("[data-qual]").forEach(b => b.onclick = () => qualDrawer(email, u.quals.find(q => q.id == b.dataset.qual), true, () => { render(); staffDrawer(email); }));
     root.querySelectorAll("[data-ck]").forEach(b => b.onclick = () => setDrawer(`<button class="link-btn" id="back">← Back to ${esc(u.name)}</button>` + checkForm(email, b.dataset.ck, u.checks[b.dataset.ck], true, u),
       r => { r.querySelector("#back").onclick = () => staffDrawer(email); wireCheckForm(r, email, b.dataset.ck, true, uploadOnly => { if (!uploadOnly) { render(); staffDrawer(email); } }); }));
   });
@@ -558,7 +680,7 @@ function userDrawer(u) {
   openDrawer(`<p class="eyebrow">${isNew ? "Add person" : "Edit person"}</p><h2>${isNew ? "New " + (u.role === "manager" ? "nursery manager" : u.role === "staff" ? "staff member" : "coordinator") : esc(u.name)}</h2>
   <div class="form-grid">
     <label class="fld" for="u_name">Full name<input type="text" id="u_name" value="${esc(u.name)}"></label>
-    <label class="fld" for="u_email">Email (they sign in with this)<input type="email" id="u_email" value="${esc(u.email)}" ${isNew ? "" : "disabled"}></label>
+    <label class="fld" for="u_email">Email (they sign in with this)<input type="email" id="u_email" value="${esc(u.email)}"></label>
     <label class="fld" for="u_phone">Mobile<input type="tel" id="u_phone" value="${esc(u.phone)}"></label>
     <label class="fld" for="u_role">Role<select id="u_role">${roleOpts.map(([v, l]) => `<option value="${v}" ${u.role === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
     <label class="fld" for="u_client" data-for="manager">Nursery<select id="u_client">${clients.map(c => `<option value="${c.id}" ${u.client_id === c.id ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select></label>
@@ -567,13 +689,24 @@ function userDrawer(u) {
   </div>
   <label class="fld" for="u_notes">Notes<textarea id="u_notes" class="plain" style="max-width:none">${esc(u.notes)}</textarea></label>
   <label class="opt" for="u_active"><input type="checkbox" id="u_active" ${u.active !== 0 ? "checked" : ""}><span>Active (can sign in${u.role === "staff" ? " and be booked" : ""})</span></label>
-  <p class="err" id="u_err"></p><div class="row"><button class="btn" id="u_go">${isNew ? "Add" : "Save"}</button></div>
+  <p class="err" id="u_err"></p><div class="row"><button class="btn" id="u_go">${isNew ? "Add" : "Save"}</button>${!isNew && u.email !== me.email && u.role !== "owner" ? `<button class="link-btn danger" id="u_del">Delete ${esc(u.name)}</button>` : ""}</div>
+  ${!isNew ? `<p class="note">Changing the email changes how they sign in, and keeps all their records. Deleting removes them and their documents for good. Anyone with booked or worked shifts can't be deleted; untick Active instead.</p>` : ""}
   ${isNew ? `<p class="note">Then send them the hub link. They sign in with a one-time code sent to this email address.</p>` : ""}`, root => {
     const sync = () => { const r = fieldVal(root, "u_role"); root.querySelectorAll("[data-for]").forEach(el => el.hidden = el.dataset.for !== r); };
     root.querySelector("#u_role").onchange = sync; sync();
     if (!clients.length) api("/api/clients").then(c => { cache.clients = c; root.querySelector("#u_client").innerHTML = c.map(x => `<option value="${x.id}" ${u.client_id === x.id ? "selected" : ""}>${esc(x.name)}</option>`).join(""); });
+    const del = root.querySelector("#u_del"); if (del) del.onclick = async () => {
+      if (!del.dataset.armed) { del.dataset.armed = 1; del.textContent = `Delete ${u.name} and their documents? Click again`; return; }
+      if (await act(del, () => api(`/api/users/${encodeURIComponent(u.email)}`, { method: "DELETE" }), root.querySelector("#u_err"))) { toast("Deleted"); closeDrawer(); render(); }
+    };
     root.querySelector("#u_go").onclick = async () => {
-      const b = { email: fieldVal(root, "u_email"), name: fieldVal(root, "u_name"), phone: fieldVal(root, "u_phone"), role: fieldVal(root, "u_role"), client_id: fieldVal(root, "u_client"), pay_rate: fieldVal(root, "u_pay"), training_name: fieldVal(root, "u_tn"), notes: fieldVal(root, "u_notes"), active: fieldVal(root, "u_active") };
+      const newEmail = fieldVal(root, "u_email").trim().toLowerCase();
+      if (!isNew && newEmail !== u.email) {
+        const ok = await act(root.querySelector("#u_go"), () => api(`/api/users/${encodeURIComponent(u.email)}/email`, { method: "POST", body: { email: newEmail } }), root.querySelector("#u_err"));
+        if (!ok) return;
+        u = { ...u, email: newEmail };
+      }
+      const b = { email: newEmail, name: fieldVal(root, "u_name"), phone: fieldVal(root, "u_phone"), role: fieldVal(root, "u_role"), client_id: fieldVal(root, "u_client"), pay_rate: fieldVal(root, "u_pay"), training_name: fieldVal(root, "u_tn"), notes: fieldVal(root, "u_notes"), active: fieldVal(root, "u_active") };
       if (await act(root.querySelector("#u_go"), () => api("/api/users", { method: "PUT", body: b }), root.querySelector("#u_err"))) {
         toast(isNew ? "Added" : "Saved");
         if (b.role === "staff") { render(); staffDrawer(b.email.trim().toLowerCase()); } else { closeDrawer(); render(); }

@@ -206,3 +206,6 @@ textarea{font-family:var(--f-body)!important;font-size:.95rem!important}
 .theme-toggle:hover{border-color:var(--accent)}
 header.top{flex-wrap:wrap}
 @media print{.theme-toggle{display:none!important}}
+
+.avatar{border-radius:50%;object-fit:cover;flex:none;display:inline-grid;place-items:center;background:var(--accent-soft);color:var(--accent);font-weight:700;border:2px solid var(--surface);box-shadow:0 0 0 1px var(--line)}
+.photo-row{display:flex;gap:16px;align-items:center;margin:4px 0 12px}

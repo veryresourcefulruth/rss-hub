@@ -235,3 +235,24 @@ header.top{flex-wrap:wrap}
 @media (max-width:560px){.ap-head{grid-template-columns:auto 1fr}.ap-head address{grid-column:1/-1}.ap-cand{grid-template-columns:1fr}.ap-photo{min-height:220px;max-width:220px;margin:0 auto}}
 @media print{.agency-profile{border:0;max-width:none;font-size:11pt}.no-print{display:none!important}
   .ap-head,.ap-bar,.ap-foot,.ap-photo{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
+
+/* Terms of engagement / Key Information Document */
+.agreement-doc{line-height:1.6;max-width:72ch}
+.agreement-doc h2{font-size:1.5rem;margin:18px 0 8px}
+.agreement-doc h3{font-size:1.1rem;margin:22px 0 6px}
+.agreement-doc ul{padding-left:1.2em;margin:6px 0 12px}
+.agreement-doc .tbl{margin:8px 0 14px}
+.agreement-doc td{vertical-align:top}
+.doc-fold{border:1px solid var(--line);border-radius:10px;padding:10px 14px;margin:12px 0;background:var(--surface)}
+.doc-fold>summary{cursor:pointer;padding:4px 0}
+.doc-fold[open]>summary{border-bottom:1px solid var(--line);margin-bottom:8px;padding-bottom:8px}
+.doc-fold .agreement-doc{max-height:60vh;overflow:auto;padding-right:6px}
+.ag-steps{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 4px}
+.ag-steps span{padding:6px 12px;border-radius:999px;border:1px solid var(--line);font-size:.88rem;color:var(--muted)}
+.ag-steps span.now{border-color:var(--accent);color:var(--ink);font-weight:600}
+.ag-steps span.done{background:var(--accent-soft);color:var(--ink)}
+.sign-panel{border:2px solid var(--accent);border-radius:12px;padding:14px 16px;margin-top:16px}
+.sign-panel h3{margin-top:0}
+.sig-box{border:1.5px solid var(--ink);border-radius:8px;padding:12px 14px;margin:0 0 16px;line-height:1.5}
+textarea.mono{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:.82rem}
+@media print{.doc-fold .agreement-doc{max-height:none;overflow:visible}.page-break{break-before:page;border:0}.agreement-doc{max-width:none}}

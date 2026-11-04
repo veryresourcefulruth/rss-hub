@@ -276,6 +276,9 @@ function readQual(b) {
   return { level: b.level, subject, institution: clean(b.institution, 150) || null, status: b.status, year: year || null, verified: !!b.verified };
 }
 
+const currentAgreement = env => env.DB.prepare("SELECT * FROM agreement_versions ORDER BY version DESC LIMIT 1").first();
+const sha256 = async s => [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)))].map(b => b.toString(16).padStart(2, "0")).join("");
+
 // D1 returns BLOB columns as a plain array of byte values; turn it back into real bytes before sending.
 const toBytes = v => v instanceof ArrayBuffer ? new Uint8Array(v) : ArrayBuffer.isView(v) ? v : new Uint8Array(v || []);
 
@@ -677,8 +680,89 @@ async function api(req, env, url) {
     return json((await qualsFor(env, [q0.email]))[q0.email]);
   }
 
+  // ===== terms of engagement + Key Information Document (signed in the hub) =====
+  if (p === "/api/agreement" && method === "GET") {
+    need(role === "staff" || isAdmin);
+    const v = isAdmin && Number(url.searchParams.get("version"));
+    const a = v ? await env.DB.prepare("SELECT * FROM agreement_versions WHERE version=?").bind(v).first() : await currentAgreement(env);
+    if (!a) return json({ version: 0 });
+    const out = { version: a.version, kid_md: a.kid_md, terms_md: a.terms_md, note: a.note, published_at: a.published_at, published_by: a.published_by, resign: !!a.resign };
+    if (role === "staff") {
+      out.mine = await env.DB.prepare("SELECT version,kid_ack_at,signed_at,typed_name FROM signatures WHERE email=? AND version=?").bind(me.email, a.version).first();
+      out.last_signed = await env.DB.prepare("SELECT version,signed_at,typed_name FROM signatures WHERE email=? AND signed_at IS NOT NULL ORDER BY version DESC LIMIT 1").bind(me.email).first();
+    }
+    return json(out);
+  }
+  if (p === "/api/agreement/kid-ack" && method === "POST") {
+    need(role === "staff");
+    const a = await currentAgreement(env), b = await body();
+    if (!a || Number(b.version) !== a.version) bad("The documents have just been updated. Reload the page to see the latest version.");
+    await env.DB.prepare("INSERT INTO signatures(email,version,kid_ack_at,kid_sha256) VALUES (?,?,?,?) ON CONFLICT(email,version) DO UPDATE SET kid_ack_at=COALESCE(kid_ack_at,excluded.kid_ack_at), kid_sha256=COALESCE(kid_sha256,excluded.kid_sha256)")
+      .bind(me.email, a.version, nowIso(), await sha256(a.kid_md)).run();
+    await audit(env, me.email, "kid_received", me.email, { version: a.version });
+    return json({ ok: true });
+  }
+  if (p === "/api/agreement/sign" && method === "POST") {
+    need(role === "staff");
+    const a = await currentAgreement(env), b = await body();
+    if (!a || Number(b.version) !== a.version) bad("The terms have just been updated. Reload the page to read the latest version before signing.");
+    const sig = await env.DB.prepare("SELECT * FROM signatures WHERE email=? AND version=?").bind(me.email, a.version).first();
+    if (!sig?.kid_ack_at) bad("First confirm you have received and read the Key Information Document.");
+    if (sig.signed_at) bad("You have already signed this version.");
+    if (b.agree !== true) bad("Tick the box to confirm you agree to the terms.");
+    const typed = clean(b.typed_name, 100);
+    if (!typed || nameKey(typed) !== nameKey(me.name)) bad(`Type your full name exactly as it appears on your RSS profile: ${me.name}`);
+    const at = nowIso(), ip = req.headers.get("cf-connecting-ip") || null, ua = clean(req.headers.get("user-agent"), 300) || null;
+    await env.DB.prepare("UPDATE signatures SET signed_at=?, typed_name=?, ip=?, user_agent=?, terms_sha256=? WHERE id=?").bind(at, typed, ip, ua, await sha256(a.terms_md), sig.id).run();
+    // The signature completes the "terms signed" check, so it no longer blocks booking.
+    const note = `Signed electronically in the RSS Hub as "${typed}" on ${at.slice(0, 16).replace("T", " ")} UTC.`;
+    const ex = await env.DB.prepare("SELECT id FROM checks WHERE email=? AND type='terms'").bind(me.email).first();
+    if (ex) await env.DB.prepare("UPDATE checks SET status='verified', ref=?, issued_on=?, expires_on=NULL, notes=?, verified_by=?, verified_at=? WHERE id=?").bind(`Version ${a.version}`, ukNow().date, note, "Signed in RSS Hub", at, ex.id).run();
+    else await env.DB.prepare("INSERT INTO checks(email,type,ref,detail,issued_on,notes,status,verified_by,verified_at,created_by,created_at) VALUES (?,?,?,?,?,?,'verified',?,?,?,?)")
+      .bind(me.email, "terms", `Version ${a.version}`, "{}", ukNow().date, note, "Signed in RSS Hub", at, me.email, at).run();
+    await audit(env, me.email, "terms_signed", me.email, { version: a.version, typed_name: typed, ip });
+    return json({ ok: true, signed_at: at });
+  }
+  if ((m = /^\/api\/agreement\/signature\/([^/]+)$/.exec(p)) && method === "GET") {
+    // A signed record with the exact text that was signed, for printing.
+    const email = decodeURIComponent(m[1]).toLowerCase();
+    need(isAdmin || (role === "staff" && email === me.email));
+    const v = Number(url.searchParams.get("version"));
+    const sig = v ? await env.DB.prepare("SELECT * FROM signatures WHERE email=? AND version=? AND signed_at IS NOT NULL").bind(email, v).first()
+      : await env.DB.prepare("SELECT * FROM signatures WHERE email=? AND signed_at IS NOT NULL ORDER BY version DESC LIMIT 1").bind(email).first();
+    if (!sig) return fail(404, "No signed terms on record.");
+    const a = await env.DB.prepare("SELECT * FROM agreement_versions WHERE version=?").bind(sig.version).first();
+    const u = await env.DB.prepare("SELECT name FROM users WHERE email=?").bind(email).first();
+    return json({ ...sig, name: u?.name, email, kid_md: a.kid_md, terms_md: a.terms_md, published_at: a.published_at });
+  }
+
   // ===== admin only below =====
   need(isAdmin);
+
+  if (p === "/api/agreement/signatures" && method === "GET") {
+    const a = await currentAgreement(env);
+    const { results: staff } = await env.DB.prepare("SELECT email,name,active FROM users WHERE role='staff' ORDER BY active DESC, name").all();
+    const { results: sigs } = await env.DB.prepare("SELECT email,version,kid_ack_at,signed_at,typed_name FROM signatures ORDER BY version DESC").all();
+    const ch = await checksFor(env, staff.map(u => u.email));
+    const { results: versions } = await env.DB.prepare("SELECT version,note,resign,published_by,published_at FROM agreement_versions ORDER BY version DESC").all();
+    return json({ version: a?.version || 0, versions, staff: staff.map(u => {
+      const mine = sigs.filter(s => s.email === u.email);
+      return { ...u, current: mine.find(s => s.version === a?.version) || null, last: mine.find(s => s.signed_at) || null, check: ch[u.email].terms?.status || null };
+    }) });
+  }
+  if (p === "/api/agreement" && method === "POST") {
+    need(role === "owner");
+    const b = await body();
+    const kid = cleanMulti(b.kid_md, 60000), terms = cleanMulti(b.terms_md, 120000);
+    if (kid.length < 200 || terms.length < 500) bad("Both documents need their full text.");
+    const a = await currentAgreement(env), version = (a?.version || 0) + 1, resign = b.resign !== false, at = nowIso();
+    const stmts = [env.DB.prepare("INSERT INTO agreement_versions(version,kid_md,terms_md,note,resign,published_by,published_at) VALUES (?,?,?,?,?,?,?)").bind(version, kid, terms, clean(b.note, 200) || null, resign ? 1 : 0, me.email, at)];
+    // Everyone must sign the new version before their next booking.
+    if (resign) stmts.push(env.DB.prepare("UPDATE checks SET status='pending', verified_by=NULL, verified_at=NULL, notes=? WHERE type='terms' AND status='verified'").bind(`New terms (version ${version}) published. Sign them in the RSS Hub under My checks.`));
+    await env.DB.batch(stmts);
+    await audit(env, me.email, "terms_published", version, { note: b.note, resign });
+    return json({ version });
+  }
 
   if (p === "/api/dashboard" && method === "GET") {
     const q = (sql, ...a) => env.DB.prepare(sql).bind(...a).first().then(r => r?.n || 0);
@@ -759,6 +843,7 @@ async function api(req, env, url) {
       env.DB.prepare("UPDATE checks SET email=? WHERE email=?").bind(to, from),
       env.DB.prepare("UPDATE quals SET email=? WHERE email=?").bind(to, from),
       env.DB.prepare("UPDATE photos SET email=? WHERE email=?").bind(to, from),
+      env.DB.prepare("UPDATE signatures SET email=? WHERE email=?").bind(to, from),
       env.DB.prepare("UPDATE shifts SET worker_email=? WHERE worker_email=?").bind(to, from),
       env.DB.prepare("UPDATE shifts SET requested_by=? WHERE requested_by=?").bind(to, from),
       env.DB.prepare("UPDATE shifts SET offered_to=REPLACE(offered_to, ?, ?) WHERE offered_to LIKE ?").bind(JSON.stringify(from), JSON.stringify(to), `%${from}%`),
@@ -779,6 +864,7 @@ async function api(req, env, url) {
       env.DB.prepare("DELETE FROM checks WHERE email=?").bind(email),
       env.DB.prepare("DELETE FROM quals WHERE email=?").bind(email),
       env.DB.prepare("DELETE FROM photos WHERE email=?").bind(email),
+      env.DB.prepare("DELETE FROM signatures WHERE email=?").bind(email),
       env.DB.prepare("DELETE FROM users WHERE email=?").bind(email),
     ]);
     await audit(env, me.email, "user_delete", email, { name: u.name, role: u.role });

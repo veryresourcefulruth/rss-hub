@@ -29,3 +29,11 @@ in `.dev.vars`. In dev mode, pick who you are with `localStorage.setItem("rss-de
 ## Deploying
 Cloudflare builds this repo on every push to `main`. Schema changes go in `migrations/` and are applied with
 `npm run migrate`.
+
+## Terms of engagement
+
+Staff read the Key Information Document, confirm they received it, then read and sign the Terms of Engagement
+in the hub (My checks → Read and sign). Signing records the typed name, time, IP and a fingerprint of the exact text,
+and marks "RSS terms of engagement signed" as verified. Every published version is kept (`agreement_versions`), so a
+signed copy always shows the text that was signed. The owner publishes new versions from Settings → Terms of engagement,
+optionally requiring everyone to sign again before their next booking. `content/*.md` holds version 1.

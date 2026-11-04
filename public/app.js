@@ -52,7 +52,7 @@ async function boot() {
     $("#foot").innerHTML = `<span></span><a href="/cdn-cgi/access/logout">Sign out</a>`; return;
   }
   const hash = location.hash.slice(1);
-  view = tabsFor().some(t => t[0] === hash) ? hash : tabsFor()[0][0];
+  view = tabsFor().some(t => t[0] === hash) || (me.role === "staff" && hash === "terms") ? hash : tabsFor()[0][0];
   $("#foot").innerHTML = `<span>Signed in as ${esc(me.name)} (${esc(me.email)})${me.client ? " · " + esc(me.client.name) : ""}</span><a href="/cdn-cgi/access/logout">Sign out</a>`;
   render();
 }
@@ -63,7 +63,8 @@ const LIST_VIEWS = ["shifts", "hours", "checks", "today", "staff", "nurseries"];
 const outstandingHtml = (list, link) => `<div class="callout outstanding" role="alert"><b>You cannot currently be booked into a shift, as you have outstanding requirements to complete:</b>
   <ul class="blk">${list.map(b => `<li>${esc(b.charAt(0).toUpperCase() + b.slice(1))}</li>`).join("")}</ul>
   <div class="note" style="color:inherit">Upload or update these in My checks. RSS checks each item, usually within 2 working days. Once everything is verified, shifts will open up for you here.</div>
-  ${link ? `<div class="row" style="margin-top:8px"><button class="btn sm" id="toChecks">Go to My checks</button></div>` : ""}</div>`;
+  <div class="row" style="margin-top:8px">${list.some(b => /terms of engagement/i.test(b)) ? `<button class="btn sm" id="toTerms">Read and sign the terms</button>` : ""}${link ? `<button class="btn ${list.some(b => /terms of engagement/i.test(b)) ? "ghost " : ""}sm" id="toChecks">Go to My checks</button>` : ""}</div></div>`;
+const wireOutstanding = () => { const t = $("#toTerms"); if (t) t.onclick = () => go("terms"); const c = $("#toChecks"); if (c) c.onclick = () => go("checks"); };
 const declinedHtml = s => s.declined?.length ? `<div class="note">Declined by ${s.declined.map(d => esc(d.name) + (d.reason ? ` (“${esc(d.reason)}”)` : "")).join(", ")}</div>` : "";
 const expiringHtml = list => list?.length ? `<div class="callout"><b>Training and certificates to renew:</b><ul class="blk" style="color:inherit">${list.map(x => `<li>${esc(x.label)}: ${x.expired ? "<b>expired</b> " : "expires "}${fullDate(x.expires_on)}</li>`).join("")}</ul></div>` : "";
 const refreshIfIdle = () => { if (me && LIST_VIEWS.includes(view) && document.visibilityState === "visible" && !$("#drawer-root").innerHTML && !document.activeElement?.matches("input,textarea,select")) render(); };
@@ -261,6 +262,86 @@ function qualDrawer(email, q, admin, after) {
   });
 }
 
+/* ---------- terms of engagement + Key Information Document ---------- */
+// Small, safe Markdown renderer for the agreement texts (escape first, then add formatting).
+function md(src) {
+  const inline = s => esc(s).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/(^|[^*])\*([^*\s][^*]*?)\*(?!\*)/g, "$1<i>$2</i>");
+  const lines = String(src || "").replace(/\r/g, "").split("\n"), out = [];
+  for (let i = 0; i < lines.length;) {
+    const l = lines[i];
+    if (!l.trim()) { i++; continue; }
+    let h = /^(#{1,3})\s+(.*)$/.exec(l);
+    if (h) { const n = h[1].length + 1; out.push(`<h${n}>${inline(h[2])}</h${n}>`); i++; continue; }
+    if (/^-{3,}\s*$/.test(l)) { out.push("<hr>"); i++; continue; }
+    if (/^\s*[-*]\s+/.test(l)) { const items = []; while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) items.push(`<li>${inline(lines[i++].replace(/^\s*[-*]\s+/, ""))}</li>`); out.push(`<ul>${items.join("")}</ul>`); continue; }
+    if (/^\s*\|/.test(l)) {
+      const rows = []; while (i < lines.length && /^\s*\|/.test(lines[i])) rows.push(lines[i++]);
+      const cells = r => r.trim().replace(/^\||\|$/g, "").split("|").map(c => c.trim());
+      const isSep = r => /^\s*\|[\s:|-]+\|\s*$/.test(r) && r.includes("-");
+      const hasHead = rows.length > 1 && isSep(rows[1]) && !isSep(rows[0]);
+      const body = rows.filter(r => !isSep(r)).map(cells);
+      let head = hasHead ? body.shift() : null; if (head && !head.some(Boolean)) head = null;
+      out.push(`<div class="tbl"><table>${head ? `<thead><tr>${head.map(c => `<th>${inline(c)}</th>`).join("")}</tr></thead>` : ""}<tbody>${body.map(r => `<tr>${r.map(c => `<td>${inline(c)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`);
+      continue;
+    }
+    const para = []; while (i < lines.length && lines[i].trim() && !/^(#{1,3}\s|\s*[-*]\s|\s*\||-{3,}\s*$)/.test(lines[i])) para.push(lines[i++]);
+    out.push(`<p>${inline(para.join(" "))}</p>`);
+  }
+  return out.join("");
+}
+const fullDateTime = iso => iso ? new Date(iso).toLocaleString("en-GB", { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", timeZone: "Europe/London" }) : "";
+// Printable record of a signed agreement: the exact text signed, plus who signed, when and from where.
+function signedRecordHtml(r) {
+  return `<div class="no-print row" style="margin:0 0 12px"><button class="btn" onclick="window.print()">Print or save as PDF</button></div>
+  <div class="agreement-doc"><div class="sig-box"><b>Signed electronically in the RSS Hub</b>
+    <div>Name typed: <b>${esc(r.typed_name)}</b> (${esc(r.name || "")}, ${esc(r.email)})</div>
+    <div>Key Information Document received: ${fullDateTime(r.kid_ack_at)}</div>
+    <div>Terms signed: ${fullDateTime(r.signed_at)} (UK time) · Version ${r.version}</div>
+    ${r.ip ? `<div class="note">IP address ${esc(r.ip)} · Fingerprint ${esc((r.terms_sha256 || "").slice(0, 16))}</div>` : ""}</div>
+  ${md(r.kid_md)}<hr class="page-break">${md(r.terms_md)}</div>`;
+}
+async function openSignedRecord(email, back) {
+  openDrawer(`<p class="loading">Loading…</p>`);
+  try {
+    const r = await api(`/api/agreement/signature/${encodeURIComponent(email)}`);
+    setDrawer((back ? `<button class="link-btn no-print" id="back">← Back</button>` : "") + signedRecordHtml(r), root => { if (back) root.querySelector("#back").onclick = back; });
+  } catch (e) { setDrawer(`<p class="err">${esc(e.message)}</p>`); }
+}
+// Staff: read the Key Information Document, confirm receipt, then read and sign the terms.
+async function agreementView() {
+  const a = await api("/api/agreement");
+  const backBtn = `<button class="link-btn" id="ag_back">← Back to My checks</button>`;
+  if (!a.version) { $("#app").innerHTML = `<div class="panel">${backBtn}<p>RSS hasn't published its terms in the hub yet.</p></div>`; $("#ag_back").onclick = () => go("checks"); return; }
+  const signed = a.mine?.signed_at, kidDone = !!a.mine?.kid_ack_at;
+  $("#app").innerHTML = `<div class="panel agreement">${backBtn}
+    <p class="eyebrow">Your agreement with RSS · Version ${a.version}</p>
+    <h2>${signed ? "Your signed terms" : "Read and sign your terms"}</h2>
+    ${signed ? `<div class="callout exp"><b>You signed these terms on ${fullDateTime(a.mine.signed_at)}.</b> <button class="link-btn" id="ag_rec">View or print your signed copy</button></div>`
+      : `<div class="ag-steps"><span class="${kidDone ? "done" : "now"}">${kidDone ? "✓" : "1."} Read your Key Information Document</span><span class="${kidDone ? "now" : ""}">2. Read and sign the Terms of Engagement</span></div>
+         ${a.last_signed ? `<div class="callout">RSS has updated its terms since you signed version ${a.last_signed.version}. Please read and sign the new version.${a.note ? ` <b>What changed:</b> ${esc(a.note)}` : ""}</div>` : ""}`}
+    <details class="doc-fold" ${signed || kidDone ? "" : "open"}><summary><b>Step 1: Key Information Document</b>${kidDone ? ` · received ${fullDateTime(a.mine.kid_ack_at)}` : ""}</summary><div class="agreement-doc">${md(a.kid_md)}</div></details>
+    ${!signed && !kidDone ? `<label class="opt" for="ag_kid"><input type="checkbox" id="ag_kid"><span>I confirm I have received and read my Key Information Document.</span></label>
+      <p class="err" id="ag_e1"></p><div class="row"><button class="btn" id="ag_kidgo">Continue to the terms</button></div>` : ""}
+    ${kidDone || signed ? `<details class="doc-fold" ${signed ? "" : "open"}><summary><b>Step 2: Terms of Engagement</b></summary><div class="agreement-doc">${md(a.terms_md)}</div></details>` : ""}
+    ${kidDone && !signed ? `<div class="sign-panel"><h3>Sign</h3>
+      <label class="opt" for="ag_ok"><input type="checkbox" id="ag_ok"><span>I have read and understood these Terms of Engagement and I agree to them. The information I have given RSS is true and complete.</span></label>
+      <label class="fld" for="ag_name">Type your full name to sign<input type="text" id="ag_name" autocomplete="name" placeholder="${esc(me.name)}" style="max-width:none"></label>
+      <p class="note">Typing your name here is your signature. RSS records the date, time and device it was signed from.</p>
+      <p class="err" id="ag_e2" role="alert"></p><div class="row"><button class="btn" id="ag_sign">Sign the terms</button></div></div>` : ""}
+  </div>`;
+  $("#ag_back").onclick = () => go("checks");
+  if ($("#ag_rec")) $("#ag_rec").onclick = () => openSignedRecord(me.email);
+  if ($("#ag_kidgo")) $("#ag_kidgo").onclick = async () => {
+    if (!$("#ag_kid").checked) { $("#ag_e1").textContent = "Tick the box to confirm you've read it."; return; }
+    if (await act($("#ag_kidgo"), () => api("/api/agreement/kid-ack", { method: "POST", body: { version: a.version } }), $("#ag_e1"))) { await agreementView(); $(".sign-panel")?.scrollIntoView({ block: "nearest" }); }
+  };
+  if ($("#ag_sign")) $("#ag_sign").onclick = async () => {
+    if (await act($("#ag_sign"), () => api("/api/agreement/sign", { method: "POST", body: { version: a.version, agree: $("#ag_ok").checked, typed_name: $("#ag_name").value } }), $("#ag_e2"))) {
+      toast("Signed. Thank you."); me = await api("/api/me"); await agreementView(); scrollTo({ top: 0 });
+    }
+  };
+}
+
 /* =====================================================================
    STAFF
    ===================================================================== */
@@ -285,7 +366,7 @@ const STAFF = {
     <div class="cards">${upcoming.length ? upcoming.map(s => `<div class="card ok"><div class="section-h" style="margin:0"><h4>${esc(s.client_name)}</h4>${shiftWhen(s)}</div>
       <div class="meta">${shiftReqs(s)} · ${hrs(s.mins)} · Pay ${gbp(s.pay_rate)}/h</div>${s.notes ? `<div class="note">${esc(s.notes)}</div>` : ""}</div>`).join("") : `<p class="empty">Nothing booked yet.</p>`}</div>
     <p class="note" style="margin-top:20px">Can't make a booked shift? Call RSS straight away. Don't contact the nursery's parent line or just not turn up.</p>`;
-    const tc = $("#toChecks"); if (tc) tc.onclick = () => go("checks");
+    wireOutstanding();
     $$("[data-confirm]").forEach(b => b.onclick = async () => {
       if (await act(b, () => api(`/api/shifts/${b.dataset.confirm}/accept`, { method: "POST", body: {} }), $("#ce" + b.dataset.confirm))) { toast("Confirmed. The nursery can now see you're coming."); render(); }
     });
@@ -323,12 +404,14 @@ const STAFF = {
     <div class="check-row"><div><b>Childcare 101 training</b><div class="note">${t.found ? `${t.passed} of ${t.total} modules passed${t.declaredAt ? ", declaration signed" : ""}` : "Not started, or your name on the training doesn't match. Use the same full name on both."}</div></div>
       ${t.complete ? pill(["Complete", "ok"]) : `<a class="btn sm" href="https://rss-training.ruth-d53.workers.dev" target="_blank" rel="noopener">Open training</a>`}</div>
     ${expiringHtml(me.expiring)}
-    ${checkRows(me.checks, k => `<button class="btn ghost sm" data-ck="${k}">${me.checks[k] ? "View / update" : "Add"}</button>`)}
+    ${checkRows(me.checks, k => k === "terms" ? `<button class="btn ${me.checks.terms?.status === "verified" ? "ghost " : ""}sm" id="toTerms2">${me.checks.terms?.status === "verified" ? "View signed terms" : "Read and sign"}</button>` : `<button class="btn ghost sm" data-ck="${k}">${me.checks[k] ? "View / update" : "Add"}</button>`)}
     ${qualRows(me.quals, true)}</div>`;
     wirePhoto($("#app"), me.email, () => render());
+    wireOutstanding(); $("#toTerms2").onclick = () => go("terms");
     $$("[data-qual]").forEach(b => b.onclick = () => qualDrawer(me.email, me.quals.find(q => q.id == b.dataset.qual), false, () => { closeDrawer(); render(); }));
     $$("[data-ck]").forEach(b => b.onclick = () => openDrawer(checkForm(me.email, b.dataset.ck, me.checks[b.dataset.ck], false), root => wireCheckForm(root, me.email, b.dataset.ck, false, () => { closeDrawer(); render(); })));
   },
+  terms: agreementView,
 };
 function shiftBack(n) { const d = new Date(me.today + "T12:00:00Z"); d.setUTCDate(d.getUTCDate() - n); return d.toISOString().slice(0, 10); }
 function timesheetDrawer(s) {
@@ -635,12 +718,14 @@ const ADMIN = {
     <div class="panel" style="margin-top:20px"><div class="section-h"><h2 style="margin:0">RSS office team</h2><button class="btn ghost" id="addOffice">Add coordinator</button></div>
       ${office.map(u => `<div class="check-row"><div><b>${esc(u.name)}</b><div class="note">${esc(u.email)} · ${u.role === "owner" ? "Owner" : "Coordinator"}${u.active ? "" : " · inactive"}</div></div><button class="btn ghost sm" data-user="${esc(u.email)}">Edit</button></div>`).join("")}
       <p class="note">Everyone signs in with a one-time code sent to their email. Add staff in the Staff tab and nursery managers in the Nurseries tab.</p></div>
+    <div class="panel" style="margin-top:20px" id="termsPanel"><h2 style="margin-top:0">Terms of engagement</h2><p class="loading">Loading…</p></div>
     <div class="panel" style="margin-top:20px"><h2 style="margin-top:0">Activity log</h2><div id="auditHost"><button class="btn ghost" id="loadAudit">Show the last 300 actions</button></div></div>`;
     if (owner) $("#st_go").onclick = async () => {
       const b = {}; for (const k of ["company_name", "company_legal", "company_email", "company_phone", "vat_number", "vat_rate", "invoice_prefix", "next_invoice", "holiday_pct", "profile_tagline", "company_address", "bank_details"]) b[k] = $("#st_" + k).value;
       if (await act($("#st_go"), () => api("/api/settings", { method: "PUT", body: b }), $("#st_err"))) toast("Saved");
     };
     $("#addOffice").onclick = () => userDrawer({ role: "coordinator", active: 1 });
+    termsPanel().catch(e => $("#termsPanel").innerHTML = `<p class="err">${esc(e.message)}</p>`);
     $$("[data-user]").forEach(b => b.onclick = () => userDrawer(users.find(u => u.email === b.dataset.user)));
     $("#loadAudit").onclick = async () => {
       const a = await api("/api/audit");
@@ -648,6 +733,37 @@ const ADMIN = {
     };
   },
 };
+
+/* ---------- admin: terms of engagement ---------- */
+async function termsPanel() {
+  const [sig, cur] = await Promise.all([api("/api/agreement/signatures"), api("/api/agreement")]);
+  const active = sig.staff.filter(u => u.active), signedNow = active.filter(u => u.current?.signed_at);
+  const status = u => u.current?.signed_at ? pill(["Signed " + fullDate(u.current.signed_at), "ok"])
+    : u.check === "verified" ? pill(["Verified by RSS (paper or earlier version)", "ok"])
+    : u.current?.kid_ack_at ? pill(["Read KID, not signed yet", "warn"]) : pill(["Not signed", "bad"]);
+  $("#termsPanel").innerHTML = `<h2 style="margin-top:0">Terms of engagement</h2>
+    <p class="note">Staff read the Key Information Document and sign the terms under <b>My checks</b>. Signing ticks off "RSS terms of engagement signed" automatically.
+    ${sig.version ? `Current version: <b>${sig.version}</b>, published ${fullDate(sig.versions[0].published_at)}.` : "Nothing published yet."} ${signedNow.length} of ${active.length} active staff have signed it.</p>
+    <div class="tbl"><table><thead><tr><th>Staff member</th><th>Status</th><th></th></tr></thead><tbody>
+    ${active.map(u => `<tr><td>${esc(u.name)}</td><td>${status(u)}</td><td>${u.last ? `<button class="link-btn" data-sigrec="${esc(u.email)}">Signed copy</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="3" class="empty">No staff yet.</td></tr>`}</tbody></table></div>
+    <div class="row"><button class="btn ghost sm" id="tp_view">Read current version</button>${me.role === "owner" ? `<button class="btn ghost sm" id="tp_edit">Update the terms or KID</button>` : ""}</div>`;
+  $$("[data-sigrec]").forEach(b => b.onclick = () => openSignedRecord(b.dataset.sigrec));
+  $("#tp_view").onclick = () => openDrawer(`<p class="eyebrow">Version ${cur.version}</p><div class="no-print row" style="margin:0 0 12px"><button class="btn" onclick="window.print()">Print or save as PDF</button></div><div class="agreement-doc">${md(cur.kid_md)}<hr class="page-break">${md(cur.terms_md)}</div>`);
+  if ($("#tp_edit")) $("#tp_edit").onclick = () => openDrawer(`<p class="eyebrow">Publish a new version</p><h2>Update the terms</h2>
+    <p class="note">Edit the text below. Use <code>## Heading</code>, <code>**bold**</code>, <code>- bullet</code> and <code>| table | rows |</code>. Each version is kept, so earlier signatures always match the text that was signed.</p>
+    <label class="fld" for="tp_kid">Key Information Document<textarea id="tp_kid" class="plain mono" rows="14" style="max-width:none">${esc(cur.kid_md)}</textarea></label>
+    <label class="fld" for="tp_terms">Terms of Engagement<textarea id="tp_terms" class="plain mono" rows="20" style="max-width:none">${esc(cur.terms_md)}</textarea></label>
+    <label class="fld" for="tp_note">What changed (shown to staff)<input type="text" id="tp_note" style="max-width:none" placeholder="e.g. New pay rate from 1 April"></label>
+    <label class="opt" for="tp_rs"><input type="checkbox" id="tp_rs" checked><span>Everyone must sign the new version before their next booking</span></label>
+    <p class="note">Untick only for small corrections (typos) that don't change anyone's rights or pay. If the Key Information Document changes, staff must get the new one within a week, so leave this ticked.</p>
+    <p class="err" id="tp_e"></p><div class="row"><button class="btn" id="tp_go">Publish version ${cur.version + 1}</button></div>`, root => {
+    const g = id => root.querySelector("#" + id);
+    g("tp_go").onclick = async () => {
+      if (!g("tp_go").dataset.armed) { g("tp_go").dataset.armed = 1; g("tp_go").textContent = g("tp_rs").checked ? "Publish and ask everyone to sign again?" : "Publish without re-signing?"; return; }
+      if (await act(g("tp_go"), () => api("/api/agreement", { method: "POST", body: { kid_md: g("tp_kid").value, terms_md: g("tp_terms").value, note: g("tp_note").value, resign: g("tp_rs").checked } }), g("tp_e"))) { closeDrawer(); toast("Published"); termsPanel(); }
+    };
+  });
+}
 
 /* ---------- admin drawers ---------- */
 async function shiftDrawer(id) {
@@ -718,8 +834,10 @@ async function staffDrawer(email) {
   <div class="check-row"><div><b>Childcare 101 training</b><div class="note">${t.found ? `${t.passed} of ${t.total} modules passed${t.declaredAt ? ", declaration signed " + fullDate(t.declaredAt) : ""}` : `No training record found under "${esc(u.training_name || u.name)}". If they used a different name, set it under Edit details.`}</div></div>${t.complete ? pill(["Complete", "ok"]) : pill(["Not complete", "bad"])}</div>
   ${expiringHtml(u.expiring)}
   ${checkRows(u.checks, k => `<button class="btn ${u.checks[k]?.status === "pending" ? "" : "ghost"} sm" data-ck="${k}">${u.checks[k]?.status === "pending" ? "Check now" : "Open"}</button>`)}
+  <div class="row"><button class="btn ghost sm" id="sd_terms">Signed terms &amp; Key Information Document</button></div>
   ${qualRows(u.quals, true)}`, root => {
     root.querySelector("#sd_edit").onclick = () => userDrawer(u);
+    root.querySelector("#sd_terms").onclick = () => openSignedRecord(email, () => staffDrawer(email));
     root.querySelector("#sd_prof").onclick = async () => { const a = await api(`/api/staff/${encodeURIComponent(email)}/profile`); setDrawer(`<button class="link-btn no-print" id="back">← Back to ${esc(u.name)}</button>` + agencyProfileHtml(a), r => r.querySelector("#back").onclick = () => staffDrawer(email)); };
     wirePhoto(root, email, () => { render(); staffDrawer(email); });
     root.querySelectorAll("[data-qual]").forEach(b => b.onclick = () => qualDrawer(email, u.quals.find(q => q.id == b.dataset.qual), true, () => { render(); staffDrawer(email); }));

@@ -59,6 +59,11 @@ async function boot() {
 // Refresh the current view when the person comes back to the tab, and every 2 minutes while it's open,
 // so new bookings and sign-offs appear without a manual reload (skipped while a form/drawer is open).
 const LIST_VIEWS = ["shifts", "hours", "checks", "today", "staff", "nurseries"];
+// Shown to staff whenever something stops them being booked.
+const outstandingHtml = (list, link) => `<div class="callout outstanding" role="alert"><b>You cannot currently be booked into a shift, as you have outstanding requirements to complete:</b>
+  <ul class="blk">${list.map(b => `<li>${esc(b.charAt(0).toUpperCase() + b.slice(1))}</li>`).join("")}</ul>
+  <div class="note" style="color:inherit">Upload or update these in My checks. RSS checks each item, usually within 2 working days. Once everything is verified, shifts will open up for you here.</div>
+  ${link ? `<div class="row" style="margin-top:8px"><button class="btn sm" id="toChecks">Go to My checks</button></div>` : ""}</div>`;
 const declinedHtml = s => s.declined?.length ? `<div class="note">Declined by ${s.declined.map(d => esc(d.name) + (d.reason ? ` (“${esc(d.reason)}”)` : "")).join(", ")}</div>` : "";
 const expiringHtml = list => list?.length ? `<div class="callout"><b>Training and certificates to renew:</b><ul class="blk" style="color:inherit">${list.map(x => `<li>${esc(x.label)}: ${x.expired ? "<b>expired</b> " : "expires "}${fullDate(x.expires_on)}</li>`).join("")}</ul></div>` : "";
 const refreshIfIdle = () => { if (me && LIST_VIEWS.includes(view) && document.visibilityState === "visible" && !$("#drawer-root").innerHTML && !document.activeElement?.matches("input,textarea,select")) render(); };
@@ -264,12 +269,12 @@ const STAFF = {
     <div class="cards">${toConfirm.map(s => `<div class="card attn"><div class="section-h" style="margin:0"><h4>${esc(s.client_name)}</h4>${shiftWhen(s)}</div>
       <div class="meta">${shiftReqs(s)} · ${hrs(s.mins)}</div>${s.notes ? `<div class="note">${esc(s.notes)}</div>` : ""}
       <div class="row" style="margin-top:6px"><button class="btn sm" data-confirm="${s.id}">Accept</button><button class="btn ghost sm" data-decline="${s.id}">Decline</button><span class="err" id="ce${s.id}"></span></div></div>`).join("")}</div>` : ""}
-    ${me.blockers.length ? `<div class="callout"><b>You can't be booked yet.</b> Still needed: ${esc(me.blockers.join("; "))}. <button class="link-btn" id="toChecks">Go to My checks</button></div>` : ""}
+    ${me.blockers.length ? outstandingHtml(me.blockers, true) : ""}
     <div class="section-h"><h2>Shifts you can take</h2></div>
     <div class="cards">${open.length ? open.map(s => `<div class="card ${s.blockers.length ? "" : "attn"}">
       <div class="section-h" style="margin:0"><h4>${esc(s.client_name)}</h4>${shiftWhen(s)}</div>
       <div class="meta">${shiftReqs(s)} · ${hrs(s.mins)}</div>${s.notes ? `<div class="note">${esc(s.notes)}</div>` : ""}
-      ${s.blockers.length ? `<ul class="blk">${s.blockers.map(b => `<li>${esc(b)}</li>`).join("")}</ul>` : `<div class="row" style="margin-top:6px"><button class="btn sm" data-accept="${s.id}">Accept this shift</button><span class="err" id="ae${s.id}"></span></div>`}
+      ${s.blockers.length ? `<div class="note" style="color:var(--bad);font-weight:600">You can't take this shift yet:</div><ul class="blk">${s.blockers.map(b => `<li>${esc(b)}</li>`).join("")}</ul>` : `<div class="row" style="margin-top:6px"><button class="btn sm" data-accept="${s.id}">Accept this shift</button><span class="err" id="ae${s.id}"></span></div>`}
     </div>`).join("") : `<p class="empty">No open shifts right now. New shifts appear here as soon as RSS offers them.</p>`}</div>
     <div class="section-h" style="margin-top:28px"><h2>Your upcoming shifts</h2></div>
     <div class="cards">${upcoming.length ? upcoming.map(s => `<div class="card ok"><div class="section-h" style="margin:0"><h4>${esc(s.client_name)}</h4>${shiftWhen(s)}</div>
@@ -309,7 +314,7 @@ const STAFF = {
     me = await api("/api/me");
     const t = me.training || {};
     $("#app").innerHTML = `<div class="panel"><p class="eyebrow">My checks</p>${photoBlock(me.email, me.name, me.has_photo, true)}<h2>${me.blockers.length ? "Not ready to book yet" : "Ready to work"}</h2>
-    ${me.blockers.length ? `<p>Still needed:</p><ul class="blk">${me.blockers.map(b => `<li>${esc(b)}</li>`).join("")}</ul>` : `<p class="note">All required checks are verified. Keep your first aid and other certificates in date.</p>`}
+    ${me.blockers.length ? outstandingHtml(me.blockers, false) : `<p class="note">All required checks and training are verified. Keep your certificates in date so you can keep picking up shifts.</p>`}
     <div class="check-row"><div><b>Childcare 101 training</b><div class="note">${t.found ? `${t.passed} of ${t.total} modules passed${t.declaredAt ? ", declaration signed" : ""}` : "Not started, or your name on the training doesn't match. Use the same full name on both."}</div></div>
       ${t.complete ? pill(["Complete", "ok"]) : `<a class="btn sm" href="https://rss-training.ruth-d53.workers.dev" target="_blank" rel="noopener">Open training</a>`}</div>
     ${expiringHtml(me.expiring)}

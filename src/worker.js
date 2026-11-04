@@ -271,6 +271,9 @@ function readQual(b) {
   return { level: b.level, subject, institution: clean(b.institution, 150) || null, status: b.status, year: year || null, verified: !!b.verified };
 }
 
+// D1 returns BLOB columns as a plain array of byte values; turn it back into real bytes before sending.
+const toBytes = v => v instanceof ArrayBuffer ? new Uint8Array(v) : ArrayBuffer.isView(v) ? v : new Uint8Array(v || []);
+
 // ---------- CSV ----------
 const csvCell = v => `"${String(v ?? "").replace(/"/g, '""')}"`;
 const csv = (rows, filename) => new Response(rows.map(r => r.map(csvCell).join(",")).join("\r\n"), {
@@ -590,7 +593,7 @@ async function api(req, env, url) {
       return json({ ok: true });
     }
     await audit(env, me.email, "document_view", d.email, { filename: d.filename });
-    return new Response(d.data, { headers: { "content-type": d.mime, "content-disposition": `inline; filename="${d.filename.replace(/"/g, "")}"`, "cache-control": "private, no-store", "x-content-type-options": "nosniff" } });
+    return new Response(toBytes(d.data), { headers: { "content-type": d.mime, "content-disposition": `inline; filename="${d.filename.replace(/"/g, "")}"`, "cache-control": "private, no-store", "x-content-type-options": "nosniff" } });
   }
 
   // ===== headshots =====
@@ -615,7 +618,7 @@ async function api(req, env, url) {
       need(allowed);
       const ph = await env.DB.prepare("SELECT mime,data FROM photos WHERE email=?").bind(email).first();
       if (!ph) return fail(404, "No photo.");
-      return new Response(ph.data, { headers: { "content-type": ph.mime, "cache-control": "private, max-age=300", "x-content-type-options": "nosniff" } });
+      return new Response(toBytes(ph.data), { headers: { "content-type": ph.mime, "cache-control": "private, max-age=300", "x-content-type-options": "nosniff" } });
     }
   }
 

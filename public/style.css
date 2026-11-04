@@ -212,3 +212,26 @@ header.top{flex-wrap:wrap}
 
 .callout.outstanding{background:var(--bad-soft);border-left-color:var(--bad)}
 .callout.outstanding .blk{color:inherit}
+
+/* Agency Staff Profile: RSS's printed profile layout (fixed light colours so it prints and reads the same everywhere) */
+.agency-profile{background:#fff;color:#111;font-family:"Albert Sans",Arial,sans-serif;max-width:760px;margin:0 auto;border:1px solid #ddd;font-size:.92rem}
+.ap-head{display:grid;grid-template-columns:auto 1fr auto;gap:14px;align-items:center;background:#DDF3D5;padding:14px 18px}
+.ap-logo{width:72px;height:auto}
+.ap-head h2{margin:0;font-family:"Albert Sans",Arial,sans-serif;font-weight:800;font-size:clamp(1.1rem,3.6vw,1.7rem);color:#111;letter-spacing:.01em}
+.ap-head address{font-style:normal;font-weight:700;font-size:.78rem;line-height:1.35;color:#111}
+.ap-bar{background:#F9C15B;color:#111;font-weight:800;text-align:center;padding:7px 10px;font-size:.88rem;letter-spacing:.03em}
+.ap-cand{display:grid;grid-template-columns:minmax(0,1fr) 200px}
+.ap-photo{display:grid;place-items:center;background:#f2f2f2;min-height:200px;overflow:hidden}
+.ap-photo img{width:100%;height:100%;object-fit:cover;display:block}
+.ap-photo span{font-size:3rem;font-weight:800;color:#6b7c85}
+.ap-t{width:100%;border-collapse:collapse}
+.ap-t td,.ap-t th{border:1.5px solid #111;padding:9px 12px;color:#111;text-align:left;vertical-align:middle}
+.ap-t td:first-child{width:46%}
+.ap-train th{text-align:center;font-weight:700;font-size:.85rem;text-transform:none;letter-spacing:0;color:#111}
+.ap-train td:not(:first-child){text-align:center}
+.ap-bad{color:#B3261E!important;font-weight:700}
+.ap-note{font-size:.78rem;color:#444;padding:8px 14px;margin:0}
+.ap-foot{background:#DDF3D5;text-align:center;font-style:italic;padding:12px;color:#111}
+@media (max-width:560px){.ap-head{grid-template-columns:auto 1fr}.ap-head address{grid-column:1/-1}.ap-cand{grid-template-columns:1fr}.ap-photo{min-height:220px;max-width:220px;margin:0 auto}}
+@media print{.agency-profile{border:0;max-width:none;font-size:11pt}.no-print{display:none!important}
+  .ap-head,.ap-bar,.ap-foot,.ap-photo{-webkit-print-color-adjust:exact;print-color-adjust:exact}}

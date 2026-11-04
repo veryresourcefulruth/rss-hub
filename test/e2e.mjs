@@ -27,11 +27,11 @@ for (const [e, n] of [[ADA, "Ada Obi"], [BEN, "Ben Lee"]]) { [s, r] = await call
 [s, r] = await call(BEN, `/api/staff/${ADA}/checks/dbs/documents`); ok(s === 403, "other staff can't see Ada's documents", r);
 [s, r] = await call(MGR, `/api/staff/${ADA}/checks/dbs/documents`); ok(s === 403, "manager can't see documents", r);
 // owner verifies everything for Ada, PFA needed for this shift
-const verify = async (who, type, extra = {}) => call(OWNER, `/api/staff/${who}/checks/${type}`, "PUT", { ref: "x", issued_on: "2026-01-01", status: "verified", ...extra });
+const verify = async (who, type, extra = {}) => call(OWNER, `/api/staff/${who}/checks/${type}`, "PUT", { ref: "x", issued_on: "2026-01-01", status: "verified", ...(type === "dbs" ? { dbs_type: "Enhanced with barred list (Child Workforce)", update_service: true, update_service_no: "C123" } : {}), ...extra });
 for (const t of ["dbs", "rtw", "id", "ref1", "ref2", "terms", "safeguarding", "food", "prevent", "hs", "safesleep", "babies"]) { [s, r] = await verify(ADA, t, t === "rtw" ? { weekly_hours_limit: 20, expires_on: d(300) } : ["safeguarding", "food", "prevent", "hs", "safesleep", "babies"].includes(t) ? { expires_on: d(400) } : {}); ok(s === 200 && r[t].status === "verified", "verify " + t, r[t] || r); }
 [s, r] = await call(OWNER, `/api/shifts/${sid}/assign`, "POST", { email: ADA }); ok(s === 409 && r.blockers.some(b => /first aid/.test(b)), "PFA requirement enforced", r);
-[s, r] = await verify(ADA, "pfa", {}); ok(s === 400, "PFA needs expiry before verifying", r);
-[s, r] = await verify(ADA, "pfa", { expires_on: d(2) }); ok(s === 200, "PFA verified (expires on shift day)", r);
+[s, r] = await verify(ADA, "pfa", { issued_on: "" }); ok(s === 400, "training needs an issue date before verifying", r);
+[s, r] = await verify(ADA, "pfa", { issued_on: d(2 - 365) }); ok(s === 200 && r.pfa.expires_on >= d(2), "PFA verified, expiry set to 1 year after issue", r.pfa);
 // Ben: training incomplete
 for (const t of ["dbs", "rtw", "id", "ref1", "ref2", "terms", "safeguarding", "food", "prevent", "hs", "safesleep", "babies"]) await verify(BEN, t, ["safeguarding", "food", "prevent", "hs", "safesleep", "babies"].includes(t) ? { expires_on: d(400) } : {});
 [s, r] = await call(OWNER, `/api/shifts/${sid}`); const cand = Object.fromEntries(r.candidates.map(c => [c.email, c.blockers]));

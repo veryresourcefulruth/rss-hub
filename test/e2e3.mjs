@@ -24,8 +24,8 @@ const qid = (await call(OWNER, "/api/staff"))[1].find(u => u.email === ADA).qual
 [s, r] = await call(OWNER, `/api/quals/${qid}`, "PUT", { level: "MSc", subject: "Early Childhood Education", institution: "Leeds Beckett", status: "in_progress", year: "2027", verified: true }); ok(s === 200 && r[0].verified === 1, "RSS verifies qual", r);
 [s, r] = await call(BEN, `/api/quals/${qid}`, "DELETE"); ok(s === 403, "other staff can't delete Ada's qual", r);
 // training with expiry -> alerts
-[s, r] = await call(OWNER, `/api/staff/${ADA}/checks/food`, "PUT", { ref: "Highfield", issued_on: d(-1000), expires_on: d(10), status: "verified" }); ok(s === 200, "food hygiene recorded", r);
-[s, r] = await call(OWNER, `/api/staff/${ADA}/checks/pfa`, "PUT", { ref: "x", issued_on: d(-1100), expires_on: d(-5), status: "verified" });
+[s, r] = await call(OWNER, `/api/staff/${ADA}/checks/food`, "PUT", { ref: "Highfield", issued_on: d(-355), status: "verified" }); ok(s === 200, "food hygiene recorded", r);
+[s, r] = await call(OWNER, `/api/staff/${ADA}/checks/pfa`, "PUT", { ref: "x", issued_on: d(-370), status: "verified" });
 [s, r] = await call(ADA, "/api/me"); ok(r.expiring.some(x => x.type === "food" && !x.expired) && r.expiring.some(x => x.type === "pfa" && x.expired), "staff see due + expired training", r.expiring);
 [s, r] = await call(OWNER, "/api/dashboard"); ok(r.expiring.some(x => x.type === "pfa" && x.expired) && r.pending >= 0, "coordinator dashboard alerts", r.expiring);
 // manager our staff

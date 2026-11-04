@@ -42,8 +42,8 @@ const penceFrom = v => { if (v === "" || v == null) return null; const n = Math.
 // years = validity. RSS policy: all training expires 1 year after the issue date; the server sets the expiry,
 // so it can't be typed in differently. Expired required items block booking.
 export const CHECKS = {
-  dbs: { group: "vetting", label: "Enhanced DBS with barred list (children)", required: true, refLabel: "Certificate number", issued: true },
-  rtw: { group: "vetting", label: "Right to work in the UK", required: true, refLabel: "Share code or document seen", expires: true },
+  dbs: { group: "vetting", label: "Enhanced DBS with barred list (children)", required: true, refLabel: "DBS certificate number", issued: true },
+  rtw: { group: "vetting", label: "Right to work in the UK", required: true, refLabel: "Share code or document number", expires: true },
   id: { group: "vetting", label: "Photo ID seen", required: true, refLabel: "Document type" },
   ref1: { group: "vetting", label: "Reference 1", required: true, refLabel: "Referee name and organisation" },
   ref2: { group: "vetting", label: "Reference 2", required: true, refLabel: "Referee name and organisation" },
@@ -58,6 +58,8 @@ export const CHECKS = {
   pfa: { group: "training", label: "Paediatric first aid (12-hour or 6-hour)", required: false, refLabel: "Provider / certificate number", issued: true, expires: true, years: 1 },
 };
 const EXPIRY_WARN_DAYS = 30;
+export const DBS_TYPES = ["Enhanced with barred list (Child Workforce)", "Enhanced without barred list (Child Workforce)", "Enhanced (Adult Workforce)", "Standard", "Basic"];
+export const RTW_METHODS = ["Share code (Home Office online check)", "British or Irish passport", "Other document (List A/B)"];
 export const QUAL_LEVELS = ["GCSE / O level", "A level / BTEC", "Level 2 childcare", "Level 3 childcare", "Foundation degree / HND", "BA", "BSc", "BEd", "LLB", "MA", "MSc", "MEd", "MBA", "PGCE", "PGDip / PGCert", "PhD / Doctorate", "Other"];
 async function photoSet(env, emails) {
   if (!emails.length) return new Set();
@@ -86,7 +88,8 @@ export function assuranceFor(user, checks, training, quals = []) {
   const c = checks || {}, ok = t => c[t]?.status === "verified";
   return {
     name: user.name, qual_level: ok("qual") ? user.qual_level || 0 : 0, qual_title: ok("qual") ? c.qual.ref : null,
-    dbs: ok("dbs") ? { issued: c.dbs.issued_on, update_service: !!c.dbs.detail?.update_service, verified_at: c.dbs.verified_at } : null,
+    dbs: ok("dbs") ? { number: c.dbs.ref, issued: c.dbs.issued_on, type: c.dbs.detail?.dbs_type || null, update_service: !!c.dbs.detail?.update_service, update_service_no: c.dbs.detail?.update_service_no || null, verified_at: c.dbs.verified_at } : null,
+    rtw_detail: ok("rtw") ? { method: c.rtw.detail?.rtw_method || null, check_date: c.rtw.detail?.check_date || null, check_ref: c.rtw.detail?.check_ref || null, expires: c.rtw.expires_on || null } : null,
     rtw: ok("rtw"), refs: ok("ref1") && ok("ref2"), id: ok("id"),
     childcare101: !!training?.complete, childcare101_at: training?.declaredAt || null,
     pfa_expires: ok("pfa") ? c.pfa.expires_on || "verified" : null,
@@ -139,7 +142,7 @@ export function blockers(user, checks, training, shift, weekMins = 0) {
     if (!c || c.status !== "verified") why.push(`${def.label} not verified`);
     else if (c.expires_on && c.expires_on < on) why.push(`${def.label} expired ${c.expires_on}`);
   }
-  if (checks.dbs?.status === "verified" && checks.dbs.detail?.barred === false) why.push("DBS does not include the children's barred list");
+  if (checks.dbs?.status === "verified" && checks.dbs.detail?.barred === false) why.push(`DBS is ${checks.dbs.detail?.dbs_type || "not"} an enhanced check with the children's barred list`);
   if (!training?.complete) why.push("Childcare 101 training not complete");
   if (shift?.needs_l3) {
     const q = checks.qual;
@@ -230,6 +233,7 @@ const SETTING_DEFAULTS = {
   invoice_prefix: "RSS-",
   next_invoice: "1",
   holiday_pct: "0",
+  profile_tagline: "Staffing Support That Understands Your World.",
 };
 async function getSettings(env) {
   const { results } = await env.DB.prepare("SELECT key,value FROM settings").all();
@@ -295,8 +299,10 @@ async function api(req, env, url) {
 
   // ===== everyone =====
   if (p === "/api/me" && method === "GET") {
-    const out = { email: me.email, name: me.name, role, today, checkTypes: CHECKS, qualLevels: QUAL_LEVELS };
+    const out = { email: me.email, name: me.name, role, today, checkTypes: CHECKS, qualLevels: QUAL_LEVELS, dbsTypes: DBS_TYPES, rtwMethods: RTW_METHODS };
     if (role === "manager") out.client = await env.DB.prepare("SELECT id,name FROM clients WHERE id=?").bind(me.client_id).first();
+    const st = await getSettings(env);
+    out.agency = { name: st.company_name, address: st.company_address, phone: st.company_phone, email: st.company_email, tagline: st.profile_tagline };
     if (role === "staff") {
       const checks = (await checksFor(env, [me.email]))[me.email];
       const training = (await trainingFor(env, [me]))[me.email];
@@ -530,9 +536,27 @@ async function api(req, env, url) {
     const u = await env.DB.prepare("SELECT email FROM users WHERE email=? AND role='staff'").bind(email).first();
     if (!u) return fail(404, "No such staff member.");
     const b = await body(), def = CHECKS[type];
+    const verifying = isAdmin && b.status === "verified"; // rules for verifying apply only when RSS verifies
     for (const f of ["issued_on", "expires_on"]) if (b[f] && !validDate(b[f])) bad("Dates must be valid.");
     const detail = {};
-    if (type === "dbs") { detail.barred = b.barred !== false; detail.update_service = !!b.update_service; if (b.last_status_check && validDate(b.last_status_check)) detail.last_status_check = b.last_status_check; }
+    if (type === "dbs") {
+      if (b.dbs_type && !DBS_TYPES.includes(b.dbs_type)) bad("Pick the DBS type.");
+      detail.dbs_type = b.dbs_type || null;
+      detail.barred = b.dbs_type ? b.dbs_type === DBS_TYPES[0] : b.barred !== false;
+      detail.update_service = !!b.update_service;
+      detail.update_service_no = clean(b.update_service_no, 30) || null;
+      if (detail.update_service && !detail.update_service_no && verifying) bad("Enter the Update Service number (it starts with C).");
+      if (b.last_status_check && validDate(b.last_status_check)) detail.last_status_check = b.last_status_check;
+      if (verifying && !detail.dbs_type) bad("Pick the DBS type before verifying.");
+    }
+    if (type === "rtw") {
+      if (b.rtw_method && !RTW_METHODS.includes(b.rtw_method)) bad("Pick how right to work was proved.");
+      detail.rtw_method = b.rtw_method || null;
+      if (b.check_date && !validDate(b.check_date)) bad("Enter a valid check date.");
+      detail.check_date = b.check_date || null;
+      detail.check_ref = clean(b.check_ref, 40) || null;
+      if (verifying && detail.rtw_method === RTW_METHODS[0] && !(detail.check_date && detail.check_ref)) bad("For a share code check, enter the check date and the reference from the Home Office result.");
+    }
     if (type === "rtw") { const n = Number(b.weekly_hours_limit); if (b.weekly_hours_limit !== "" && b.weekly_hours_limit != null && !(n > 0 && n <= 60)) bad("Weekly hours limit must be between 1 and 60, or blank."); if (n) detail.weekly_hours_limit = n; }
     const existing = await env.DB.prepare("SELECT * FROM checks WHERE email=? AND type=?").bind(email, type).first();
     let status = existing?.status || "pending";
@@ -540,7 +564,7 @@ async function api(req, env, url) {
     else if (!isAdmin) status = "pending"; // a staff edit always needs re-checking
     const verified = status === "verified" && (existing?.status !== "verified" || isAdmin);
     const fixedTerm = def.group === "training" && def.expires && def.years;
-    if (fixedTerm && b.status === "verified" && !b.issued_on) bad("Enter the issue date. Training expires one year after it.");
+    if (fixedTerm && verifying && !b.issued_on) bad("Enter the issue date. Training expires one year after it.");
     const expires = fixedTerm ? (b.issued_on ? addYears(b.issued_on, def.years) : null) : def.expires ? b.expires_on || null : null;
     const vals = [clean(b.ref, 200) || null, JSON.stringify(detail), b.issued_on || null, expires, cleanMulti(b.notes, 1000) || null];
     if (status === "verified" && def.expires && !vals[3] && type !== "rtw") bad("Enter the expiry date before verifying.");
@@ -684,6 +708,14 @@ async function api(req, env, url) {
     const { results: staff } = await env.DB.prepare("SELECT * FROM users WHERE role='staff' ORDER BY active DESC, name").all();
     const ch = await checksFor(env, staff.map(u => u.email)), tr = await trainingFor(env, staff), qs = await qualsFor(env, staff.map(u => u.email)), phs = await photoSet(env, staff.map(u => u.email));
     return json(staff.map(u => ({ ...u, has_photo: phs.has(u.email), quals: qs[u.email], checks: ch[u.email], training: tr[u.email], blockers: blockers(u, ch[u.email], tr[u.email], null), expiring: expiringFor(ch[u.email], today) })));
+  }
+
+  if ((m = /^\/api\/staff\/([^/]+)\/profile$/.exec(p)) && method === "GET") {
+    const email = decodeURIComponent(m[1]).toLowerCase();
+    const u = await env.DB.prepare("SELECT * FROM users WHERE email=? AND role='staff'").bind(email).first();
+    if (!u) return fail(404, "No such staff member.");
+    const ch = await checksFor(env, [email]), tr = await trainingFor(env, [u]), qs = await qualsFor(env, [email]), phs = await photoSet(env, [email]);
+    return json({ ...assuranceFor(u, ch[email], tr[email], qs[email]), photo: phs.has(email) ? `/api/photo/${encodeURIComponent(email)}` : null });
   }
 
   if (p === "/api/users" && method === "GET") {

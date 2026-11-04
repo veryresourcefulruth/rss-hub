@@ -126,12 +126,16 @@ function checkForm(email, type, c, admin, user) {
     ${def.expires ? (def.group === "training" && def.years
       ? `<label class="fld" for="ck_exp">Expiry date<input type="date" id="ck_exp" value="${esc(c?.expires_on)}" disabled><span class="note" style="font-weight:400">Set automatically: 1 year after the issue date (RSS policy).</span></label>`
       : `<label class="fld" for="ck_exp">${type === "rtw" ? "Permission ends (blank if no time limit)" : "Expiry / renewal date"}<input type="date" id="ck_exp" value="${esc(c?.expires_on)}"></label>`) : ""}
-    ${type === "dbs" ? `<label class="fld" for="ck_lsc">Last Update Service status check<input type="date" id="ck_lsc" value="${esc(d.last_status_check)}"></label>` : ""}
+    ${type === "dbs" ? `<label class="fld" for="ck_dt">DBS type<select id="ck_dt"><option value="">Choose…</option>${me.dbsTypes.map(t => `<option ${d.dbs_type === t ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></label>
+      <label class="fld" for="ck_usn">Update Service number<input type="text" id="ck_usn" value="${esc(d.update_service_no)}" placeholder="e.g. C1234567890"></label>
+      <label class="fld" for="ck_lsc">Last Update Service status check<input type="date" id="ck_lsc" value="${esc(d.last_status_check)}"></label>` : ""}
+    ${type === "rtw" ? `<label class="fld" for="ck_rm">Proof of right to work<select id="ck_rm"><option value="">Choose…</option>${me.rtwMethods.map(t => `<option ${d.rtw_method === t ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></label>
+      <label class="fld" for="ck_cd">Visa / right to work check date<input type="date" id="ck_cd" value="${esc(d.check_date)}"></label>
+      <label class="fld" for="ck_cr">Visa check reference<input type="text" id="ck_cr" value="${esc(d.check_ref)}" placeholder="e.g. WE-J88G273-2Y"></label>` : ""}
     ${type === "rtw" && admin ? `<label class="fld" for="ck_whl">Weekly hours limit (e.g. 20 on a Student visa in term time)<input type="number" id="ck_whl" min="1" max="60" value="${esc(d.weekly_hours_limit)}"></label>` : ""}
     ${type === "qual" && admin ? `<label class="fld" for="ck_lvl">Level<select id="ck_lvl">${[[0, "Not relevant / below Level 2"], [2, "Level 2"], [3, "Level 3 (full and relevant)"], [6, "Level 6 / QTS / EYTS"]].map(([v, l]) => `<option value="${v}" ${(user?.qual_level || 0) === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>` : ""}
   </div>
-  ${type === "dbs" ? `<label class="opt" for="ck_bar"><input type="checkbox" id="ck_bar" ${d.barred !== false ? "checked" : ""}><span>Enhanced with the children's barred list</span></label>
-    <label class="opt" for="ck_us"><input type="checkbox" id="ck_us" ${d.update_service ? "checked" : ""}><span>Subscribed to the DBS Update Service</span></label>` : ""}
+  ${type === "dbs" ? `<label class="opt" for="ck_us"><input type="checkbox" id="ck_us" ${d.update_service ? "checked" : ""}><span>Subscribed to the DBS Update Service</span></label>` : ""}
   ${admin ? `<label class="fld" for="ck_st">Status<select id="ck_st">${["pending", "verified", "rejected"].map(s => `<option value="${s}" ${(c?.status || "pending") === s ? "selected" : ""}>${{ pending: "Awaiting check", verified: "Verified (I've seen the original or checked online)", rejected: "Rejected" }[s]}</option>`).join("")}</select></label>` : ""}
   <label class="fld" for="ck_notes">${admin ? "Notes (shown to the worker if rejected)" : "Notes for RSS"}<textarea id="ck_notes" class="plain" style="max-width:none">${esc(c?.notes)}</textarea></label>
   <p class="err" id="ck_err" role="alert"></p>
@@ -175,7 +179,8 @@ function wireCheckForm(root, email, type, admin, after) {
     if (g("ck_iss")) b.issued_on = g("ck_iss").value;
     if (g("ck_exp")) b.expires_on = g("ck_exp").value;
     if (g("ck_lsc")) b.last_status_check = g("ck_lsc").value;
-    if (g("ck_bar")) { b.barred = g("ck_bar").checked; b.update_service = g("ck_us").checked; }
+    if (g("ck_dt")) { b.dbs_type = g("ck_dt").value; b.update_service = g("ck_us").checked; b.update_service_no = g("ck_usn").value; }
+    if (g("ck_rm")) { b.rtw_method = g("ck_rm").value; b.check_date = g("ck_cd").value; b.check_ref = g("ck_cr").value; }
     if (g("ck_whl")) b.weekly_hours_limit = g("ck_whl").value;
     if (g("ck_lvl")) b.qual_level = Number(g("ck_lvl").value);
     if (g("ck_st")) b.status = g("ck_st").value;
@@ -359,11 +364,54 @@ function assuranceHtml(a) {
     ${a.pfa_expires ? `<span class="pill ok">Paediatric first aid${a.pfa_expires !== "verified" ? " to " + fullDate(a.pfa_expires) : ""}</span>` : `<span class="pill">No PFA</span>`}
     ${top ? `<span class="pill info">${esc(top.level)} ${esc(top.subject)}${top.status === "in_progress" ? " (in progress)" : ""}</span>` : ""}</div>`;
 }
+// Agency Staff Profile: the document a nursery keeps for its records (single central record), laid out like
+// RSS's previous paper profile. Prints / saves as PDF from the browser.
+function agencyProfileHtml(a) {
+  const ag = me.agency || {}, d = s => s ? new Date(s + "T12:00:00Z").toLocaleDateString("en-GB", { timeZone: "UTC" }) : "–";
+  const rowsT = [];
+  rowsT.push([`RSS Childcare 101 induction`, a.childcare101 ? "Completed" : "Not completed", a.childcare101_at ? d(a.childcare101_at.slice(0, 10)) : ""]);
+  for (const t of a.training) { const exp = t.expires && t.expires < me.today; rowsT.push([esc(t.label), exp ? "Expired" : "Completed", t.expires ? (exp ? "Expired on " : "Valid to ") + d(t.expires) : ""]); }
+  if (a.qual_level) rowsT.push([`Childcare qualification: Level ${a.qual_level}${a.qual_title ? " " + esc(a.qual_title) : ""}`, "Completed", ""]);
+  for (const q of a.quals) rowsT.push([`${esc(q.level)} ${esc(q.subject)}${q.institution ? ", " + esc(q.institution) : ""}`, q.status === "completed" ? "Completed" : "Ongoing", q.year ? (q.status === "completed" ? q.year : "Expected " + q.year) : ""]);
+  return `<div class="no-print row" style="margin:0 0 12px"><button class="btn" onclick="window.print()">Print or save as PDF</button></div>
+  <article class="agency-profile">
+    <header class="ap-head"><img src="/rss-logo.png" alt="Resourceful Staffing Support logo" class="ap-logo"><h2>AGENCY STAFF PROFILE</h2>
+      <address>${esc(ag.address || "").replace(/,\s*/g, "<br>")}${ag.phone ? "<br>" + esc(ag.phone) : ""}</address></header>
+    <div class="ap-bar">CANDIDATE INFORMATION</div>
+    <div class="ap-cand"><table class="ap-t"><tbody>
+      <tr><td>Candidate name</td><td>${esc(a.name)}</td></tr>
+      <tr><td>DBS number</td><td>${esc(a.dbs?.number || "–")}</td></tr>
+      <tr><td>DBS issue date</td><td>${d(a.dbs?.issued)}</td></tr>
+      <tr><td>DBS type</td><td>${esc(a.dbs?.type || (a.dbs ? "Enhanced" : "Not verified"))}</td></tr>
+      <tr><td>Update Service #</td><td>${esc(a.dbs?.update_service_no || (a.dbs?.update_service ? "Subscribed" : "–"))}</td></tr>
+    </tbody></table><div class="ap-photo">${a.photo ? `<img src="${esc(a.photo)}" alt="Photo of ${esc(a.name)}" onerror="this.replaceWith(Object.assign(document.createElement('span'),{textContent:'${esc(initials(a.name))}'}))">` : `<span>${esc(initials(a.name))}</span>`}</div></div>
+    <div class="ap-bar">RIGHT TO WORK</div>
+    <table class="ap-t"><tbody>
+      <tr><td>Proof of right to work</td><td>${esc(a.rtw_detail?.method || (a.rtw ? "Verified" : "Not verified"))}</td></tr>
+      <tr><td>Visa check date</td><td>${d(a.rtw_detail?.check_date)}</td></tr>
+      <tr><td>Visa check reference</td><td>${esc(a.rtw_detail?.check_ref || "–")}</td></tr>
+      ${a.rtw_detail?.expires ? `<tr><td>Permission to work until</td><td>${d(a.rtw_detail.expires)}</td></tr>` : ""}
+      <tr><td>References (2) and photo ID</td><td>${a.refs && a.id ? "Verified by RSS" : "Not complete"}</td></tr>
+    </tbody></table>
+    <div class="ap-bar">TRAININGS / QUALIFICATIONS</div>
+    <table class="ap-t ap-train"><thead><tr><th>Title</th><th>Status</th><th>Date</th></tr></thead><tbody>
+      ${rowsT.map(r => `<tr><td>${r[0]}</td><td class="${r[1] === "Expired" || r[1] === "Not completed" ? "ap-bad" : ""}">${r[1]}</td><td>${r[2]}</td></tr>`).join("")}
+    </tbody></table>
+    <p class="ap-note">Checks verified by Resourceful Staffing Support. Original documents are held by RSS. Profile generated ${d(me.today)}.</p>
+    <footer class="ap-foot">“${esc(ag.tagline || "")}”</footer>
+  </article>`;
+}
 function profileHtml(a) {
   const row = (label, val, ok) => `<div class="check-row"><div><b>${label}</b></div>${ok === undefined ? val : pill([val, ok === "info" ? "info" : ok ? "ok" : "bad"])}</div>`;
   return `<h3>Vetting (checked by RSS)</h3>
-    ${row("Enhanced DBS with children's barred list", a.dbs ? `Verified${a.dbs.issued ? " · issued " + fullDate(a.dbs.issued) : ""}${a.dbs.update_service ? " · Update Service" : ""}` : "Not verified", !!a.dbs)}
-    ${row("Right to work", a.rtw ? "Verified" : "Not verified", a.rtw)}${row("Two references", a.refs ? "Verified" : "Not verified", a.refs)}${row("Photo ID", a.id ? "Seen" : "Not seen", a.id)}
+    ${row("Enhanced DBS with children's barred list", a.dbs ? "Verified" : "Not verified", !!a.dbs)}
+    ${a.dbs ? `<div class="tbl" style="margin:0 0 8px"><table><tbody>
+      <tr><td>DBS number</td><td class="n">${esc(a.dbs.number || "–")}</td></tr><tr><td>DBS issue date</td><td class="n">${fullDate(a.dbs.issued) || "–"}</td></tr>
+      <tr><td>DBS type</td><td>${esc(a.dbs.type || "–")}</td></tr><tr><td>Update Service number</td><td class="n">${esc(a.dbs.update_service_no || (a.dbs.update_service ? "Subscribed" : "Not subscribed"))}</td></tr></tbody></table></div>` : ""}
+    ${row("Right to work", a.rtw ? "Verified" : "Not verified", a.rtw)}
+    ${a.rtw_detail ? `<div class="tbl" style="margin:0 0 8px"><table><tbody>
+      <tr><td>Proof of right to work</td><td>${esc(a.rtw_detail.method || "–")}</td></tr><tr><td>Visa check date</td><td class="n">${fullDate(a.rtw_detail.check_date) || "–"}</td></tr>
+      <tr><td>Visa check reference</td><td class="n">${esc(a.rtw_detail.check_ref || "–")}</td></tr>${a.rtw_detail.expires ? `<tr><td>Permission ends</td><td class="n">${fullDate(a.rtw_detail.expires)}</td></tr>` : ""}</tbody></table></div>` : ""}${row("Two references", a.refs ? "Verified" : "Not verified", a.refs)}${row("Photo ID", a.id ? "Seen" : "Not seen", a.id)}
     ${row("RSS Childcare 101 induction", a.childcare101 ? "Completed" + (a.childcare101_at ? " " + fullDate(a.childcare101_at) : "") : "Not completed", a.childcare101)}
     <h3>Childcare qualification</h3>${row(a.qual_level ? `Level ${a.qual_level}${a.qual_title ? " · " + esc(a.qual_title) : ""}` : "No verified childcare qualification", "")}
     <h3>Training</h3>${a.training.length ? a.training.map(t => row(esc(t.label), t.expires ? (t.expires < me.today ? "Expired " : "Valid to ") + fullDate(t.expires) : "Verified", !t.expires || t.expires >= me.today)).join("") : `<p class="empty">No training recorded yet.</p>`}
@@ -384,7 +432,7 @@ const MANAGER = {
     <div class="tbl"><table><thead><tr><th>Date</th><th>Worker</th><th>Hours</th><th>Timesheet</th></tr></thead><tbody>
     ${past.map(s => `<tr><td class="n">${dayName(s.date)}</td><td>${esc(s.worker_name)}</td><td class="n">${s.actMins != null ? hrs(s.actMins) : "–"}</td><td>${TS[s.ts_status] ? pill(TS[s.ts_status]) : pill(["Not submitted yet", ""])}</td></tr>`).join("") || `<tr><td colspan="4" class="empty">Nothing yet.</td></tr>`}</tbody></table></div>`;
     $("#newReq").onclick = () => go("request");
-    $$("[data-prof]").forEach(b => b.onclick = () => { const s = up.find(x => x.id == b.dataset.prof); openDrawer(`<p class="eyebrow">RSS worker</p>${avatar(s.assurance.photo, s.worker_name, 120)}<h2>${esc(s.worker_name)}</h2>${profileHtml(s.assurance)}`); });
+    $$("[data-prof]").forEach(b => b.onclick = () => { const s = up.find(x => x.id == b.dataset.prof); openDrawer(agencyProfileHtml(s.assurance)); });
     $$("[data-cancel]").forEach(b => b.onclick = () => cancelShift(b.dataset.cancel, b));
   },
   async request() {
@@ -404,7 +452,7 @@ const MANAGER = {
     <p class="note" style="margin-top:-6px">Everyone RSS has booked with you in the last 6 months or coming up, with their checks, qualifications and training.</p>
     <div class="cards">${list.length ? list.map((a, i) => `<div class="card"><div class="section-h" style="margin:0"><div style="display:flex;gap:12px;align-items:center">${avatar(a.photo, a.name, 52)}<h4>${esc(a.name)}</h4></div><span class="note">${a.next_date ? "Next: " + dayName(a.next_date) : a.last_date ? "Last: " + dayName(a.last_date) : ""}</span></div>
       ${assuranceHtml(a)}<div class="row" style="margin-top:4px"><button class="btn ghost sm" data-full="${i}">Full profile</button></div></div>`).join("") : `<p class="empty">No RSS staff booked with you yet.</p>`}</div>`;
-    $$("[data-full]").forEach(b => b.onclick = () => { const a = list[+b.dataset.full]; openDrawer(`<p class="eyebrow">RSS worker</p>${avatar(a.photo, a.name, 120)}<h2>${esc(a.name)}</h2>${profileHtml(a)}`); });
+    $$("[data-full]").forEach(b => b.onclick = () => { const a = list[+b.dataset.full]; openDrawer(agencyProfileHtml(a)); });
   },
 };
 function shiftFormHtml(s, { count = false, clients = null } = {}) {
@@ -580,7 +628,7 @@ const ADMIN = {
     const owner = me.role === "owner";
     const F = (k, l, type = "text") => `<label class="fld" for="st_${k}">${l}<input type="${type}" id="st_${k}" value="${esc(s[k])}" ${owner ? "" : "disabled"}></label>`;
     $("#app").innerHTML = `<div class="panel"><h2 style="margin-top:0">Business details</h2><p class="note">Used on invoices.${owner ? "" : " Only the owner can change these."}</p>
-      <div class="form-grid">${F("company_name", "Trading name")}${F("company_legal", "Company")}${F("company_email", "Email", "email")}${F("company_phone", "Phone")}${F("vat_number", "VAT number (blank if not registered)")}${F("vat_rate", "VAT rate %", "number")}${F("invoice_prefix", "Invoice number prefix")}${F("next_invoice", "Next invoice number", "number")}${F("holiday_pct", "Rolled-up holiday pay % on pay export (0 = none)", "number")}</div>
+      <div class="form-grid">${F("company_name", "Trading name")}${F("company_legal", "Company")}${F("company_email", "Email", "email")}${F("company_phone", "Phone")}${F("vat_number", "VAT number (blank if not registered)")}${F("vat_rate", "VAT rate %", "number")}${F("invoice_prefix", "Invoice number prefix")}${F("next_invoice", "Next invoice number", "number")}${F("holiday_pct", "Rolled-up holiday pay % on pay export (0 = none)", "number")}${F("profile_tagline", "Strapline on staff profiles")}</div>
       <label class="fld" for="st_company_address">Address<textarea id="st_company_address" class="plain" style="max-width:none" ${owner ? "" : "disabled"}>${esc(s.company_address)}</textarea></label>
       <label class="fld" for="st_bank_details">Bank details for invoices<textarea id="st_bank_details" class="plain" style="max-width:none" ${owner ? "" : "disabled"}>${esc(s.bank_details)}</textarea></label>
       ${owner ? `<p class="err" id="st_err"></p><div class="row"><button class="btn" id="st_go">Save details</button></div>` : ""}</div>
@@ -589,7 +637,7 @@ const ADMIN = {
       <p class="note">Everyone signs in with a one-time code sent to their email. Add staff in the Staff tab and nursery managers in the Nurseries tab.</p></div>
     <div class="panel" style="margin-top:20px"><h2 style="margin-top:0">Activity log</h2><div id="auditHost"><button class="btn ghost" id="loadAudit">Show the last 300 actions</button></div></div>`;
     if (owner) $("#st_go").onclick = async () => {
-      const b = {}; for (const k of ["company_name", "company_legal", "company_email", "company_phone", "vat_number", "vat_rate", "invoice_prefix", "next_invoice", "holiday_pct", "company_address", "bank_details"]) b[k] = $("#st_" + k).value;
+      const b = {}; for (const k of ["company_name", "company_legal", "company_email", "company_phone", "vat_number", "vat_rate", "invoice_prefix", "next_invoice", "holiday_pct", "profile_tagline", "company_address", "bank_details"]) b[k] = $("#st_" + k).value;
       if (await act($("#st_go"), () => api("/api/settings", { method: "PUT", body: b }), $("#st_err"))) toast("Saved");
     };
     $("#addOffice").onclick = () => userDrawer({ role: "coordinator", active: 1 });
@@ -665,13 +713,14 @@ async function staffDrawer(email) {
   if (!u) return setDrawer(`<p class="err">Not found.</p>`);
   const t = u.training || {};
   setDrawer(`<p class="eyebrow">Staff file</p>${photoBlock(u.email, u.name, u.has_photo, true)}<h2>${esc(u.name)}</h2>
-  <p class="note">${esc(u.email)}${u.phone ? " · " + esc(u.phone) : ""} · Pay ${u.pay_rate != null ? gbp(u.pay_rate) + "/h" : "not set"} <button class="link-btn" id="sd_edit">Edit details</button></p>
+  <p class="note">${esc(u.email)}${u.phone ? " · " + esc(u.phone) : ""} · Pay ${u.pay_rate != null ? gbp(u.pay_rate) + "/h" : "not set"} <button class="link-btn" id="sd_edit">Edit details</button> <button class="link-btn" id="sd_prof">Agency profile</button></p>
   ${u.blockers.length ? `<div class="callout"><b>Can't be booked:</b><ul class="blk">${u.blockers.map(b => `<li>${esc(b)}</li>`).join("")}</ul></div>` : `<div class="callout exp"><b>Ready to book.</b></div>`}
   <div class="check-row"><div><b>Childcare 101 training</b><div class="note">${t.found ? `${t.passed} of ${t.total} modules passed${t.declaredAt ? ", declaration signed " + fullDate(t.declaredAt) : ""}` : `No training record found under "${esc(u.training_name || u.name)}". If they used a different name, set it under Edit details.`}</div></div>${t.complete ? pill(["Complete", "ok"]) : pill(["Not complete", "bad"])}</div>
   ${expiringHtml(u.expiring)}
   ${checkRows(u.checks, k => `<button class="btn ${u.checks[k]?.status === "pending" ? "" : "ghost"} sm" data-ck="${k}">${u.checks[k]?.status === "pending" ? "Check now" : "Open"}</button>`)}
   ${qualRows(u.quals, true)}`, root => {
     root.querySelector("#sd_edit").onclick = () => userDrawer(u);
+    root.querySelector("#sd_prof").onclick = async () => { const a = await api(`/api/staff/${encodeURIComponent(email)}/profile`); setDrawer(`<button class="link-btn no-print" id="back">← Back to ${esc(u.name)}</button>` + agencyProfileHtml(a), r => r.querySelector("#back").onclick = () => staffDrawer(email)); };
     wirePhoto(root, email, () => { render(); staffDrawer(email); });
     root.querySelectorAll("[data-qual]").forEach(b => b.onclick = () => qualDrawer(email, u.quals.find(q => q.id == b.dataset.qual), true, () => { render(); staffDrawer(email); }));
     root.querySelectorAll("[data-ck]").forEach(b => b.onclick = () => setDrawer(`<button class="link-btn" id="back">← Back to ${esc(u.name)}</button>` + checkForm(email, b.dataset.ck, u.checks[b.dataset.ck], true, u),

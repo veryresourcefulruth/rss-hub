@@ -48,8 +48,11 @@ export const CHECKS = {
   ref2: { group: "vetting", label: "Reference 2", required: true, refLabel: "Referee name and organisation" },
   terms: { group: "vetting", label: "RSS terms of engagement signed", required: true, refLabel: "Version signed", issued: true },
   safeguarding: { group: "training", core: true, label: "Safeguarding Level 2", required: true, refLabel: "Course and provider", issued: true, expires: true, years: 2 },
-  food: { group: "training", core: true, label: "Food safety and hygiene", required: true, refLabel: "Course and provider", issued: true, expires: true, years: 3 },
-  prevent: { group: "training", core: true, label: "Prevent duty", required: true, refLabel: "Course and provider", issued: true, expires: true, years: 2 },
+  prevent: { group: "training", core: true, label: "The Prevent Duty and British Values", required: true, refLabel: "Course and provider", issued: true, expires: true, years: 2 },
+  food: { group: "training", core: true, label: "Food Safety & Hygiene", required: true, refLabel: "Course and provider", issued: true, expires: true, years: 3 },
+  hs: { group: "training", core: true, label: "Health & Safety in the Workplace", required: true, refLabel: "Course and provider", issued: true, expires: true, years: 3 },
+  safesleep: { group: "training", core: true, label: "Safe Sleep", required: true, refLabel: "Course and provider", issued: true, expires: true, years: 2 },
+  babies: { group: "training", core: true, label: "Blossoming Babies", required: true, refLabel: "Course and provider", issued: true, expires: true, years: 3 },
   qual: { group: "training", label: "Childcare qualification", required: false, refLabel: "Qualification title", issued: true },
   pfa: { group: "training", label: "Paediatric first aid (12-hour or 6-hour)", required: false, refLabel: "Provider / certificate number", issued: true, expires: true, years: 3 },
 };

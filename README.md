@@ -55,4 +55,4 @@ have no PIN or forget it, the manager can confirm instead (recorded under the ma
 person for 15 minutes. Backup: staff tap "I've arrived" / "I'm leaving" on their own phone; the phone's location must be
 within about 300 m of the nursery (location found from the postcode in the nursery's address, or set from the iPad).
 Signing out fills in the timesheet (from the booked start, or later if they arrived late, to when they left, less the
-booked break) and sends it to the manager to approve. The office sees arrivals and anyone 15+ minutes late on Today.
+booked break) and sends it to the manager to approve. Staff can also record "Start break" and "End break"; when they do, the break actually taken is deducted instead of the booked one. New shifts default to a 30-minute unpaid break. The office sees arrivals and anyone 15+ minutes late on Today.

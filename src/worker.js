@@ -139,6 +139,7 @@ async function branchLocation(env, c) {
 // Records arrival or departure on a booked shift. Signing out also fills in the timesheet for the nursery to approve.
 async function clockShift(env, s, action, by, note, actor) {
   const now = ukNow(), t = toMin(now.time), at = nowIso();
+  const breaks = s.breaks ? JSON.parse(s.breaks) : [];
   if (s.status !== "filled") bad("This shift isn't booked.");
   if (s.date !== now.date) bad(s.date > now.date ? "You can only sign in on the day of the shift." : "This shift was on an earlier day. Add the hours in My hours instead.");
   if (action === "in") {
@@ -146,17 +147,28 @@ async function clockShift(env, s, action, by, note, actor) {
     if (t < toMin(s.start) - 60) bad(`Too early: signing in opens at ${String(Math.floor((toMin(s.start) - 60) / 60)).padStart(2, "0")}:${String((toMin(s.start) - 60) % 60).padStart(2, "0")}.`);
     if (t > toMin(s.finish)) bad("This shift has already finished. Add the hours in My hours instead.");
     await env.DB.prepare("UPDATE shifts SET clock_in_at=?, clock_in_by=?, clock_note=? WHERE id=? AND clock_in_at IS NULL").bind(at, by, note || null, s.id).run();
+  } else if (action === "break_out" || action === "break_in") {
+    if (!s.clock_in_at) bad("Sign in first.");
+    if (s.clock_out_at) bad(`Already signed out at ${ukTime(s.clock_out_at)}.`);
+    const open = breaks.length && !breaks[breaks.length - 1].in;
+    if (action === "break_out") { if (open) bad(`Already on break since ${ukTime(breaks[breaks.length - 1].out)}.`); breaks.push({ out: at, in: null, by }); }
+    else { if (!open) bad("Not on a break."); breaks[breaks.length - 1].in = at; }
+    await env.DB.prepare("UPDATE shifts SET breaks=? WHERE id=?").bind(JSON.stringify(breaks), s.id).run();
   } else if (action === "out") {
     if (!s.clock_in_at) bad("Sign in first.");
     if (s.clock_out_at) bad(`Already signed out at ${ukTime(s.clock_out_at)}.`);
-    await env.DB.prepare("UPDATE shifts SET clock_out_at=?, clock_out_by=?, clock_note=COALESCE(clock_note||' · ','')||COALESCE(?,'') WHERE id=?").bind(at, by, note || null, s.id).run();
+    if (breaks.length && !breaks[breaks.length - 1].in) breaks[breaks.length - 1].in = at;   // signing out ends any break
+    await env.DB.prepare("UPDATE shifts SET clock_out_at=?, clock_out_by=?, breaks=?, clock_note=COALESCE(clock_note||' · ','')||COALESCE(?,'') WHERE id=?").bind(at, by, breaks.length ? JSON.stringify(breaks) : null, note || null, s.id).run();
     // Timesheet: paid from the booked start (or later, if they arrived late) to when they actually left.
     const inT = ukTime(s.clock_in_at), outT = now.time;
     const start = toMin(inT) > toMin(s.start) ? inT : s.start;
     if (s.ts_status === "none" && toMin(outT) > toMin(start)) {
-      const brk = Math.min(s.break_min || 0, Math.max(0, toMin(outT) - toMin(start) - 1));
+      // Unpaid break: what they actually took (break out → break in), or the booked break if none was recorded.
+      const taken = breaks.reduce((a, b) => a + Math.max(0, Math.round((Date.parse(b.in) - Date.parse(b.out)) / 60000)), 0);
+      const brk = Math.min(breaks.length ? taken : s.break_min || 0, Math.max(0, toMin(outT) - toMin(start) - 1));
+      const bTxt = breaks.length ? ` Break ${breaks.map(b => `${ukTime(b.out)}–${ukTime(b.in)}`).join(", ")} (${taken} min).` : ` No break recorded, so the booked ${s.break_min || 0} min break is used.`;
       await env.DB.prepare("UPDATE shifts SET ts_status='submitted', act_start=?, act_finish=?, act_break=?, ts_submitted_at=?, ts_comment=? WHERE id=? AND ts_status='none'")
-        .bind(start, outT, brk, at, `From sign-in: arrived ${inT}, left ${outT}.`, s.id).run();
+        .bind(start, outT, brk, at, `From sign-in: arrived ${inT}, left ${outT}.` + bTxt, s.id).run();
     }
   } else bad("Unknown action.");
   await audit(env, actor, "clock_" + action, s.id, { by, note });
@@ -164,10 +176,10 @@ async function clockShift(env, s, action, by, note, actor) {
 }
 
 async function arrivalsToday(env, today, clientId) {
-  const { results } = await env.DB.prepare(`SELECT s.id,s.start,s.finish,s.clock_in_at,s.clock_out_at,s.clock_in_by,s.clock_note,c.name client_name,u.name worker_name,u.phone worker_phone
+  const { results } = await env.DB.prepare(`SELECT s.id,s.start,s.finish,s.clock_in_at,s.clock_out_at,s.clock_in_by,s.clock_note,s.breaks,c.name client_name,u.name worker_name,u.phone worker_phone
     FROM shifts s JOIN clients c ON c.id=s.client_id JOIN users u ON u.email=s.worker_email WHERE s.date=? AND s.status='filled' ${clientId ? "AND s.client_id=?" : ""} ORDER BY s.start`).bind(...(clientId ? [today, clientId] : [today])).all();
   const t = toMin(ukNow().time);
-  return results.map(r => ({ ...r, late: !r.clock_in_at && t > toMin(r.start) + 15 && t < toMin(r.finish) }));
+  return results.map(r => ({ ...r, breaks: r.breaks ? JSON.parse(r.breaks) : [], late: !r.clock_in_at && t > toMin(r.start) + 15 && t < toMin(r.finish) }));
 }
 // ---------- Childcare 101 (lives in the Hub; progress keyed by email) ----------
 async function trainingContent(env) {
@@ -400,7 +412,7 @@ const SHIFT_FROM = `FROM shifts s JOIN clients c ON c.id=s.client_id LEFT JOIN u
 function shiftOut(s, role) {
   const mins = shiftMins(s.start, s.finish, s.break_min);
   const actMins = s.act_start ? shiftMins(s.act_start, s.act_finish, s.act_break) : null;
-  const o = { ...s, mins, actMins, offered_to: s.offered_to ? JSON.parse(s.offered_to) : null, declined: s.declined ? JSON.parse(s.declined) : [] };
+  const o = { ...s, mins, actMins, offered_to: s.offered_to ? JSON.parse(s.offered_to) : null, declined: s.declined ? JSON.parse(s.declined) : [], breaks: s.breaks ? JSON.parse(s.breaks) : [] };
   if (role === "staff") o.declined = [];
   if (role === "staff") { delete o.charge_rate; delete o.offered_to; }
   if (role === "manager") { delete o.pay_rate; delete o.offered_to; }
@@ -922,10 +934,10 @@ async function api(req, env, url) {
     const client = cid && await env.DB.prepare("SELECT id,name,address,lat,lng FROM clients WHERE id=?").bind(cid).first();
     if (!client) bad("Choose a nursery.");
     if (p === "/api/station" && method === "GET") {
-      const { results } = await env.DB.prepare(`SELECT s.id,s.date,s.start,s.finish,s.break_min,s.room,s.worker_email,s.clock_in_at,s.clock_out_at,s.clock_in_by,s.clock_out_by,u.name worker_name,
+      const { results } = await env.DB.prepare(`SELECT s.id,s.date,s.start,s.finish,s.break_min,s.room,s.worker_email,s.clock_in_at,s.clock_out_at,s.clock_in_by,s.clock_out_by,s.breaks,u.name worker_name,
         (SELECT 1 FROM station_pins sp WHERE sp.email=s.worker_email) has_pin, (SELECT 1 FROM photos ph WHERE ph.email=s.worker_email) has_photo
         FROM shifts s JOIN users u ON u.email=s.worker_email WHERE s.client_id=? AND s.date=? AND s.status='filled' ORDER BY s.start, u.name`).bind(client.id, today).all();
-      return json({ client: { id: client.id, name: client.name, located: client.lat != null }, date: today, time: ukNow().time, shifts: results.map(r => ({ ...r, has_pin: !!r.has_pin, has_photo: !!r.has_photo })) });
+      return json({ client: { id: client.id, name: client.name, located: client.lat != null }, date: today, time: ukNow().time, shifts: results.map(r => ({ ...r, breaks: r.breaks ? JSON.parse(r.breaks) : [], has_pin: !!r.has_pin, has_photo: !!r.has_photo })) });
     }
     if (p === "/api/station/clock" && method === "POST") {
       const b = await body();

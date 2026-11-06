@@ -2,11 +2,15 @@
    their own 4-digit PIN when they arrive and leave. If they haven't set a PIN, the manager can confirm instead.
    Backup: staff sign in on their own phone (location-checked) from My shifts. */
 
+const onBreak = s => (s.breaks || []).length && !s.breaks[s.breaks.length - 1].in ? s.breaks[s.breaks.length - 1] : null;
+const breakText = s => (s.breaks || []).map(b => `${ukClock(b.out)}–${b.in ? ukClock(b.in) : "…"}`).join(", ");
+const ACT = { in: ["Sign in", "Signing in", "Signed in", "Welcome"], out: ["Sign out", "Signing out", "Signed out", "Thank you"], break_out: ["Start break", "Starting break", "Break started", "Enjoy your break"], break_in: ["End break", "Back from break", "Break ended", "Welcome back"] };
 const ukClock = iso => iso ? new Date(iso).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/London" }) : "";
 // Arrival status pill for a shift card (today only).
 function clockPill(s) {
   if (s.date !== me.today || s.status !== "filled") return "";
   if (s.clock_out_at) return pill(["Left " + ukClock(s.clock_out_at), ""]);
+  if (onBreak(s)) return pill(["On break since " + ukClock(onBreak(s).out), "warn"]);
   if (s.clock_in_at) return pill(["Arrived " + ukClock(s.clock_in_at), "ok"]);
   const now = new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/London" });
   const late = (t => +t.slice(0, 2) * 60 + +t.slice(3))(now) > (+s.start.slice(0, 2) * 60 + +s.start.slice(3)) + 15;
@@ -25,18 +29,19 @@ async function stationView() {
   const d = await api("/api/station" + q);
   const picker = isAdmin() ? `<select id="st_client" aria-label="Nursery">${cache.clients.map(c => `<option value="${c.id}" ${c.id == cache.stationClient ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select>` : "";
   const card = s => {
-    const state = s.clock_out_at ? "done" : s.clock_in_at ? "in" : "out";
+    const state = s.clock_out_at ? "done" : onBreak(s) ? "break" : s.clock_in_at ? "in" : "out";
     return `<button class="st-card ${state}" data-st="${s.id}" ${state === "done" ? "disabled" : ""}>
       ${avatar(s.has_photo ? `/api/photo/${encodeURIComponent(s.worker_email)}` : null, s.worker_name, 84)}
       <span class="st-name">${esc(s.worker_name)}</span>
       <span class="st-when">${s.start}–${s.finish}${s.room ? " · " + esc(s.room) : ""}</span>
-      <span class="st-state">${state === "done" ? `Left ${ukClock(s.clock_out_at)} ✓` : state === "in" ? `Here since ${ukClock(s.clock_in_at)}` : "Not signed in"}</span>
-      <span class="st-act">${state === "done" ? "All done" : state === "in" ? "Tap to sign out" : "Tap to sign in"}</span></button>`;
+      <span class="st-state">${state === "done" ? `Left ${ukClock(s.clock_out_at)} ✓` : state === "break" ? `On break since ${ukClock(onBreak(s).out)}` : state === "in" ? `Here since ${ukClock(s.clock_in_at)}` : "Not signed in"}</span>
+      ${s.breaks?.length && state !== "break" ? `<span class="st-when">Break ${breakText(s)}</span>` : ""}
+      <span class="st-act">${state === "done" ? "All done" : state === "break" ? "Tap to end break" : state === "in" ? "Tap for break or sign out" : "Tap to sign in"}</span></button>`;
   };
   $("#app").innerHTML = `<div class="station">
     <div class="st-top"><div><p class="eyebrow">RSS sign-in station</p><h2>${esc(d.client.name)}</h2><p class="note">${new Date(d.date + "T12:00:00Z").toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", timeZone: "UTC" })} · <b id="st_time">${d.time}</b></p></div>
       <div class="row">${picker}<button class="btn ghost sm" id="st_full">Full screen</button></div></div>
-    <p class="st-help">RSS staff: tap your name, then enter your 4-digit PIN when you arrive and when you leave.</p>
+    <p class="st-help">RSS staff: tap your name and enter your 4-digit PIN when you arrive, go on break, come back and leave.</p>
     <div class="st-grid">${d.shifts.length ? d.shifts.map(card).join("") : `<p class="empty">No RSS staff are booked here today.</p>`}</div>
     <p class="note" style="margin-top:22px">Staff must also sign in on the nursery's own sign-in system, as normal. ${d.client.located ? "" : `<button class="link-btn" id="st_loc">Set this nursery's location</button> so staff can also sign in on their own phones if this iPad isn't available. Do this while you're at the nursery.`}</p></div>`;
   if (picker) $("#st_client").onchange = e => { cache.stationClient = e.target.value; stationView(); };
@@ -55,19 +60,29 @@ async function stationView() {
   }, 30000);
 }
 
-function pinPad(s, q) {
-  const action = s.clock_in_at ? "out" : "in";
+function pinPad(s, q, chosen) {
+  if (!chosen) {
+    const options = !s.clock_in_at ? ["in"] : onBreak(s) ? ["break_in", "out"] : ["break_out", "out"];
+    if (options.length === 1) return pinPad(s, q, options[0]);
+    document.body.insertAdjacentHTML("beforeend", `<div id="pinpad" class="pinpad" role="dialog" aria-modal="true"><div class="pp-box"><p class="eyebrow">${esc(s.worker_name)}</p><h2>What are you doing?</h2>
+      <div class="pp-choose">${options.map(a => `<button class="btn ${a === "out" ? "ghost" : ""}" data-choose="${a}">${ACT[a][0]}</button>`).join("")}</div>
+      <button class="link-btn" data-choose="x">Cancel</button></div></div>`);
+    $("#pinpad").onclick = e => { if (e.target.id === "pinpad") $("#pinpad").remove(); };
+    $$("[data-choose]").forEach(b => b.onclick = () => { $("#pinpad").remove(); if (b.dataset.choose !== "x") pinPad(s, q, b.dataset.choose); });
+    return;
+  }
+  const action = chosen, L = ACT[action];
   let pin = "";
   const close = () => $("#pinpad")?.remove();
   const send = async body => {
     try {
       const r = await api("/api/station/clock" + q, { method: "POST", body: { shift_id: s.id, action, ...body } });
-      $("#pinpad .pp-box").innerHTML = `<div class="pp-done"><div class="pp-tick">✓</div><h2>${action === "in" ? "Welcome" : "Thank you"}, ${esc(s.worker_name.split(" ")[0])}</h2><p>${action === "in" ? "Signed in" : "Signed out"} at <b>${r.time}</b>.</p>${action === "out" ? `<p class="note">Your hours have been sent for the manager to approve.</p>` : `<p class="note">Remember to sign in on the nursery's own system too.</p>`}</div>`;
+      $("#pinpad .pp-box").innerHTML = `<div class="pp-done"><div class="pp-tick">✓</div><h2>${L[3]}, ${esc(s.worker_name.split(" ")[0])}</h2><p>${L[2]} at <b>${r.time}</b>.</p>${action === "out" ? `<p class="note">Your hours have been sent for the manager to approve.</p>` : action === "in" ? `<p class="note">Remember to sign in on the nursery's own system too.</p>` : action === "break_out" ? `<p class="note">Tap your name again when you're back.</p>` : ""}</div>`;
       setTimeout(() => { close(); stationView(); }, 3500);
     } catch (e) { pin = ""; paint(e.message); }
   };
   const paint = err => {
-    $("#pinpad .pp-box").innerHTML = `<p class="eyebrow">${action === "in" ? "Signing in" : "Signing out"}</p><h2>${esc(s.worker_name)}</h2>
+    $("#pinpad .pp-box").innerHTML = `<p class="eyebrow">${L[1]}</p><h2>${esc(s.worker_name)}</h2>
       <p class="note">Enter your 4-digit RSS Hub PIN</p>
       <div class="pp-dots" aria-label="${pin.length} of 4 digits entered">${[0, 1, 2, 3].map(i => `<i class="${i < pin.length ? "on" : ""}"></i>`).join("")}</div>
       <p class="err" role="alert">${esc(err || "")}</p>
@@ -83,9 +98,9 @@ function pinPad(s, q) {
     });
     $("#pp_mgr").onclick = () => {
       $("#pinpad .pp-box").innerHTML = `<p class="eyebrow">Manager confirmation</p><h2>${esc(s.worker_name)}</h2>
-        <p>Only tap this if you're the nursery manager and you've seen ${esc(s.worker_name.split(" ")[0])} ${action === "in" ? "arrive" : "leave"} just now. It's recorded under your name.</p>
+        <p>Only tap this if you're the nursery manager and you've seen ${esc(s.worker_name.split(" ")[0])} ${{ in: "arrive", out: "leave", break_out: "go on break", break_in: "come back from break" }[action]} just now. It's recorded under your name.</p>
         <p class="err" role="alert"></p>
-        <div class="row" style="justify-content:center"><button class="btn" id="pp_ok">Confirm ${action === "in" ? "arrival" : "departure"}</button><button class="btn ghost" id="pp_back">Back</button></div>`;
+        <div class="row" style="justify-content:center"><button class="btn" id="pp_ok">Confirm: ${ACT[action][2].toLowerCase()}</button><button class="btn ghost" id="pp_back">Back</button></div>`;
       $("#pp_ok").onclick = () => send({ manager_confirm: true });
       $("#pp_back").onclick = () => paint();
     };
@@ -98,21 +113,23 @@ function pinPad(s, q) {
 /* ---------- staff: sign in on own phone (backup) and set PIN ---------- */
 function phoneClockHtml(s) {
   if (s.date !== me.today || s.status !== "filled" || s.clock_out_at) return s.clock_out_at && s.date === me.today ? `<div class="note">Signed out at ${ukClock(s.clock_out_at)}. Your hours have gone to the nursery to approve.</div>` : "";
-  return `<div class="row" style="margin-top:6px">${s.clock_in_at ? `<span class="note">Signed in at ${ukClock(s.clock_in_at)}.</span>` : ""}
-    <button class="btn ${s.clock_in_at ? "ghost " : ""}sm" data-pclock="${s.id}" data-act="${s.clock_in_at ? "out" : "in"}">${s.clock_in_at ? "I'm leaving" : "I've arrived"}</button><span class="err" id="pc${s.id}"></span></div>
+  const btn = (a, l, ghost) => `<button class="btn ${ghost ? "ghost " : ""}sm" data-pclock="${s.id}" data-act="${a}">${l}</button>`;
+  const b = onBreak(s);
+  return `<div class="row" style="margin-top:6px">${s.clock_in_at ? `<span class="note">Signed in at ${ukClock(s.clock_in_at)}${b ? `, on break since ${ukClock(b.out)}` : s.breaks?.length ? `. Break ${breakText(s)}` : ""}.</span>` : ""}
+    ${!s.clock_in_at ? btn("in", "I've arrived") : b ? btn("break_in", "End break") + btn("out", "I'm leaving", 1) : btn("break_out", "Start break") + btn("out", "I'm leaving", 1)}<span class="err" id="pc${s.id}"></span></div>
     <div class="note">Use the nursery's sign-in iPad if there is one. Use this button only if it isn't available.</div>`;
 }
 function wirePhoneClock() {
   $$("[data-pclock]").forEach(b => b.onclick = () => {
     const err = $("#pc" + b.dataset.pclock);
     if (!navigator.geolocation) { err.textContent = "This phone can't share its location. Use the nursery's sign-in iPad."; return; }
-    b.disabled = true; err.textContent = "Checking you're at the nursery…";
+    $$(`[data-pclock="${b.dataset.pclock}"]`).forEach(x => x.disabled = true); err.textContent = "Checking you're at the nursery…";
     navigator.geolocation.getCurrentPosition(async p => {
       try {
         const r = await api(`/api/shifts/${b.dataset.pclock}/clock`, { method: "POST", body: { action: b.dataset.act, lat: p.coords.latitude, lng: p.coords.longitude, acc: p.coords.accuracy } });
-        toast(b.dataset.act === "in" ? `Signed in at ${r.time}` : `Signed out at ${r.time}. Hours sent for approval.`); render();
-      } catch (e) { err.textContent = e.message; b.disabled = false; }
-    }, () => { err.textContent = "Location is turned off for the RSS Hub. Turn it on in your phone settings, or use the nursery's sign-in iPad."; b.disabled = false; },
+        toast(`${ACT[b.dataset.act][2]} at ${r.time}.${b.dataset.act === "out" ? " Hours sent for approval." : ""}`); render();
+      } catch (e) { err.textContent = e.message; $$(`[data-pclock="${b.dataset.pclock}"]`).forEach(x => x.disabled = false); }
+    }, () => { err.textContent = "Location is turned off for the RSS Hub. Turn it on in your phone settings, or use the nursery's sign-in iPad."; $$(`[data-pclock="${b.dataset.pclock}"]`).forEach(x => x.disabled = false); },
     { enableHighAccuracy: true, timeout: 20000, maximumAge: 60000 });
   });
 }

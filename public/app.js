@@ -527,7 +527,7 @@ const MANAGER = {
   async request() {
     $("#app").innerHTML = `<div class="panel" style="max-width:720px"><p class="eyebrow">${esc(me.client.name)}</p><h2>Request cover</h2>
     <p class="note">RSS only books people whose DBS, right to work, references and RSS training are verified. Tick the boxes if the shift needs more.</p>
-    ${shiftFormHtml({ date: me.today, start: "08:00", finish: "18:00", break_min: 60 }, { count: true })}
+    ${shiftFormHtml({ date: me.today, start: "08:00", finish: "18:00", break_min: 30 }, { count: true })}
     <p class="err" id="sf_err"></p><div class="row"><button class="btn" id="sf_go">Send request to RSS</button></div></div>`;
     $("#sf_go").onclick = async () => {
       const ok = await act($("#sf_go"), () => api("/api/shifts", { method: "POST", body: readShiftForm($("#app")) }), $("#sf_err"));
@@ -550,7 +550,7 @@ function shiftFormHtml(s, { count = false, clients = null } = {}) {
     <label class="fld" for="sf_d">Date<input type="date" id="sf_d" value="${esc(s.date)}"></label>
     <label class="fld" for="sf_s">Start<input type="time" id="sf_s" value="${esc(s.start)}"></label>
     <label class="fld" for="sf_f">Finish<input type="time" id="sf_f" value="${esc(s.finish)}"></label>
-    <label class="fld" for="sf_b">Unpaid break (minutes)<input type="number" id="sf_b" min="0" max="240" value="${s.break_min ?? 0}"></label>
+    <label class="fld" for="sf_b">Unpaid break (minutes)<input type="number" id="sf_b" min="0" max="240" value="${s.break_min ?? 30}"></label>
     <label class="fld" for="sf_r">Room<input type="text" id="sf_r" value="${esc(s.room)}" placeholder="e.g. Baby Room (0–2)"></label>
     ${count ? `<label class="fld" for="sf_n">How many staff?<input type="number" id="sf_n" min="1" max="10" value="1"></label>` : ""}
   </div>
@@ -605,8 +605,8 @@ const ADMIN = {
       ${card(d.toInvoice, "approved shifts not yet invoiced", "billing", 1)}${card(d.pendingChecks, "documents waiting for your check", "staff", 1)}${card(`${d.readyCount}/${d.staffCount}`, "staff ready to book", "staff")}
     </div>
     <div class="panel" style="margin-top:24px"><div class="section-h" style="margin:0 0 8px"><h3 style="margin:0">Today's arrivals</h3><button class="btn ghost sm" id="toStation">Open a sign-in station</button></div>
-      ${d.arrivals.length ? `<div class="tbl"><table><thead><tr><th>Worker</th><th>Nursery</th><th>Booked</th><th>Arrived</th><th>Left</th></tr></thead><tbody>${d.arrivals.map(a => `<tr${a.late ? ` class="late"` : ""}><td><b>${esc(a.worker_name)}</b>${a.late && a.worker_phone ? ` <a href="tel:${esc(a.worker_phone)}">Call</a>` : ""}</td><td>${esc(a.client_name)}</td><td class="n">${a.start}–${a.finish}</td>
-        <td class="n">${a.clock_in_at ? ukClock(a.clock_in_at) + (a.clock_in_by === "phone" ? " 📱" : a.clock_in_by === "manager" ? " (manager)" : "") : a.late ? `<b style="color:var(--bad)">Not arrived</b>` : "–"}</td><td class="n">${a.clock_out_at ? ukClock(a.clock_out_at) : "–"}</td></tr>`).join("")}</tbody></table></div>` : `<p class="empty">Nobody is booked today.</p>`}</div>
+      ${d.arrivals.length ? `<div class="tbl"><table><thead><tr><th>Worker</th><th>Nursery</th><th>Booked</th><th>Arrived</th><th>Break</th><th>Left</th></tr></thead><tbody>${d.arrivals.map(a => `<tr${a.late ? ` class="late"` : ""}><td><b>${esc(a.worker_name)}</b>${a.late && a.worker_phone ? ` <a href="tel:${esc(a.worker_phone)}">Call</a>` : ""}</td><td>${esc(a.client_name)}</td><td class="n">${a.start}–${a.finish}</td>
+        <td class="n">${a.clock_in_at ? ukClock(a.clock_in_at) + (a.clock_in_by === "phone" ? " 📱" : a.clock_in_by === "manager" ? " (manager)" : "") : a.late ? `<b style="color:var(--bad)">Not arrived</b>` : "–"}</td><td class="n">${a.breaks.length ? breakText(a) + (onBreak(a) ? " (on break)" : "") : "–"}</td><td class="n">${a.clock_out_at ? ukClock(a.clock_out_at) : "–"}</td></tr>`).join("")}</tbody></table></div>` : `<p class="empty">Nobody is booked today.</p>`}</div>
     <div class="grid2" style="margin-top:24px">
       <div class="panel"><h3 style="margin-top:0">Not ready to book</h3>${d.notReady.length ? d.notReady.map(u => `<div class="check-row"><div><b>${esc(u.name)}</b><ul class="blk">${u.blockers.map(b => `<li>${esc(b)}</li>`).join("")}</ul></div><button class="btn ghost sm" data-staff="${esc(u.email)}">Open</button></div>`).join("") : `<p class="empty">Everyone is ready.</p>`}</div>
       <div class="panel"><h3 style="margin-top:0">Training &amp; certificates expired or due in 30 days</h3>${d.expiring.length ? d.expiring.map(x => `<div class="check-row"><div><b>${esc(x.name)}</b><div class="note">${esc(x.label)} · ${x.expired ? "<b style='color:var(--bad)'>expired</b> " : ""}${fullDate(x.expires_on)}</div></div><button class="btn ghost sm" data-staff="${esc(x.email)}">Open</button></div>`).join("") : `<p class="empty">Nothing expiring soon.</p>`}</div>
@@ -634,7 +634,7 @@ const ADMIN = {
       <div class="meta">${pill(STATUS[s.status])}${clockPill(s)}${TS[s.ts_status] ? pill(TS[s.ts_status]) : ""}<span>${shiftReqs(s)}</span>${s.worker_name ? `<b style="color:var(--ink)">${esc(s.worker_name)}</b>` : ""}</div></button>`).join("") : `<p class="empty">No shifts to show.</p>`}</div>`;
     $("#f_show").onchange = e => { cache.shiftFilter = { ...f, show: e.target.value }; render(); };
     $("#f_client").onchange = e => { cache.shiftFilter = { ...f, client: e.target.value }; render(); };
-    $("#newShift").onclick = () => openDrawer(`<p class="eyebrow">New shift</p><h2>Add a shift</h2>${shiftFormHtml({ date: me.today, start: "08:00", finish: "18:00", break_min: 60, client_id: clients[0]?.id }, { count: true, clients })}
+    $("#newShift").onclick = () => openDrawer(`<p class="eyebrow">New shift</p><h2>Add a shift</h2>${shiftFormHtml({ date: me.today, start: "08:00", finish: "18:00", break_min: 30, client_id: clients[0]?.id }, { count: true, clients })}
       <label class="opt" for="sf_pub"><input type="checkbox" id="sf_pub" checked><span>Offer it to all eligible staff now</span></label>
       <p class="err" id="sf_err"></p><div class="row"><button class="btn" id="sf_go">Create</button></div>`, root => {
       root.querySelector("#sf_go").onclick = async () => {
@@ -788,7 +788,7 @@ async function shiftDrawer(id) {
   const pendingHtml = s.status === "pending" ? `<div class="panel" style="padding:16px"><b>${esc(s.worker_name)}</b> has been asked to work this shift and hasn't confirmed yet${s.assigned_at ? ` (asked ${new Date(s.assigned_at).toLocaleString("en-GB", { dateStyle: "short", timeStyle: "short" })})` : ""}.
      <div class="note">${esc(s.worker_email)}${s.worker_phone ? " · " + esc(s.worker_phone) : ""}. It's on their My shifts page to accept or decline.</div>
      <div class="row" style="margin-top:8px"><button class="btn ghost sm" id="sd_un">Withdraw and ask someone else</button></div><p class="err" id="sd_err1"></p></div>` : "";
-  setDrawer(`<p class="eyebrow">Shift #${s.id} · ${pill(STATUS[s.status])} ${clockPill(s)} ${TS[s.ts_status] ? pill(TS[s.ts_status]) : ""}</p>${s.clock_in_at ? `<p class="note">Arrived ${ukClock(s.clock_in_at)} (${{ pin: "sign-in station, PIN", manager: "confirmed by manager", phone: "own phone" }[s.clock_in_by] || s.clock_in_by})${s.clock_out_at ? ` · left ${ukClock(s.clock_out_at)} (${{ pin: "sign-in station, PIN", manager: "confirmed by manager", phone: "own phone" }[s.clock_out_by] || s.clock_out_by})` : ""}${s.clock_note ? ` · ${esc(s.clock_note)}` : ""}</p>` : ""}
+  setDrawer(`<p class="eyebrow">Shift #${s.id} · ${pill(STATUS[s.status])} ${clockPill(s)} ${TS[s.ts_status] ? pill(TS[s.ts_status]) : ""}</p>${s.clock_in_at ? `<p class="note">Arrived ${ukClock(s.clock_in_at)} (${{ pin: "sign-in station, PIN", manager: "confirmed by manager", phone: "own phone" }[s.clock_in_by] || s.clock_in_by})${s.clock_out_at ? ` · left ${ukClock(s.clock_out_at)} (${{ pin: "sign-in station, PIN", manager: "confirmed by manager", phone: "own phone" }[s.clock_out_by] || s.clock_out_by})` : ""}${s.breaks?.length ? ` · break ${breakText(s)}` : ""}${s.clock_note ? ` · ${esc(s.clock_note)}` : ""}</p>` : ""}
   <h2>${esc(s.client_name)}</h2><p>${shiftWhen(s)} · ${hrs(s.mins)}</p>
   ${s.requested_by ? `<p class="note">Requested by ${esc(s.requested_by)} on ${fullDate(s.created_at)}.${s.cancelled_reason ? " Cancelled: " + esc(s.cancelled_reason) : ""}</p>` : ""}
   ${pendingHtml}${declinedHtml(s)}

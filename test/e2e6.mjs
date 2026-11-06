@@ -15,7 +15,7 @@ await call(OWNER, "/api/users", "PUT", { email: M2, name: "Other Manager", role:
 for (const [e, n] of [[W1, "Wes Lane"], [W2, "Val Moss"]]) await call(OWNER, "/api/users", "PUT", { email: e, name: n, role: "staff", pay_rate: "13.00" });
 const today = uk().date, tomorrow = uk(24 * 60).date;
 const ins = (w, date, start, finish) => sql(`INSERT INTO shifts(client_id,date,start,finish,break_min,status,worker_email,pay_rate,charge_rate,created_at,filled_at) VALUES (${cid},'${date}','${start}','${finish}',30,'filled','${w}',1300,1800,datetime('now'),datetime('now'))`);
-ins(W1, today, uk(-10).time, uk(180).time); ins(W2, today, uk(-30).time, uk(240).time); ins(W1, tomorrow, "08:00", "16:00");
+ins(W1, today, uk(-150).time, uk(180).time); ins(W2, today, uk(-30).time, uk(240).time); ins(W1, tomorrow, "08:00", "16:00");
 const ids = JSON.parse(sql(`SELECT id,worker_email,date FROM shifts WHERE client_id=${cid} ORDER BY id`))[0].results;
 const A = ids[0].id, Bv = ids[1].id, C = ids[2].id;
 
@@ -45,11 +45,19 @@ ok(arr.find(a => a.id === Bv)?.late === true && arr.find(a => a.id === A)?.clock
 for (let i = 0; i < 5; i++) await call(M1, "/api/station/clock", "POST", { shift_id: A, action: "out", pin: "9999" });
 [s, r] = await call(M1, "/api/station/clock", "POST", { shift_id: A, action: "out", pin: "4826" }); ok(s === 400 && /Too many/.test(r.error), "locked after 5 wrong PINs", r);
 sql(`DELETE FROM pin_fails WHERE email='${W1}'`);
-sql(`UPDATE shifts SET clock_in_at=strftime('%Y-%m-%dT%H:%M:%fZ','now','-5 minutes') WHERE id=${A}`); // pretend they arrived 5 minutes ago
+sql(`UPDATE shifts SET clock_in_at=strftime('%Y-%m-%dT%H:%M:%fZ','now','-120 minutes') WHERE id=${A}`); // pretend they arrived 2 hours ago
+// break out / break in
+[s, r] = await call(M1, "/api/station/clock", "POST", { shift_id: A, action: "break_in", pin: "4826" }); ok(s === 400 && /Not on a break/.test(r.error), "can't end a break that hasn't started", r);
+[s, r] = await call(M1, "/api/station/clock", "POST", { shift_id: A, action: "break_out", pin: "4826" }); ok(s === 200, "starts break with PIN", r);
+[s, r] = await call(M1, "/api/station/clock", "POST", { shift_id: A, action: "break_out", pin: "4826" }); ok(s === 400 && /Already on break/.test(r.error), "can't start two breaks at once", r);
+[s, r] = await call(M1, "/api/station"); ok(r.shifts.find(x => x.id === A).breaks.length === 1 && !r.shifts.find(x => x.id === A).breaks[0].in, "station shows them on break", r.shifts.find(x => x.id === A).breaks);
+sql(`UPDATE shifts SET breaks=json_array(json_object('out',strftime('%Y-%m-%dT%H:%M:%fZ','now','-22 minutes'),'in',NULL,'by','pin')) WHERE id=${A}`); // the break began 22 minutes ago
+[s, r] = await call(M1, "/api/station/clock", "POST", { shift_id: A, action: "break_in", pin: "4826" }); ok(s === 200, "ends break with PIN", r);
 // sign out fills the timesheet
 [s, r] = await call(M1, "/api/station/clock", "POST", { shift_id: A, action: "out", pin: "4826" }); ok(s === 200, "signs out with PIN", r);
 [s, r] = await call(W1, `/api/shifts?from=${today}`); const a = r.find(x => x.id === A);
 ok(a.ts_status === "submitted" && a.act_start && a.act_finish && /From sign-in/.test(a.ts_comment), "timesheet filled in and sent for approval", a);
+ok(a.act_break >= 21 && a.act_break <= 23 && /Break /.test(a.ts_comment), "timesheet uses the break actually taken (22 min), not the booked 30", { b: a.act_break, c: a.ts_comment });
 [s, r] = await call(M1, "/api/station/clock", "POST", { shift_id: A, action: "out", pin: "4826" }); ok(s === 400 && /Already signed out/.test(r.error), "can't sign out twice", r);
 // phone backup with location check
 [s, r] = await call(M1, "/api/station/location", "POST", { lat: 53.8008, lng: -1.5491, acc: 20 }); ok(s === 200, "manager saves the nursery's location from the iPad", r);

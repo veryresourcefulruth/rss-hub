@@ -275,3 +275,35 @@ textarea.mono{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:.82r
 .tab.sm{padding:6px 12px;font-size:.88rem}
 .t-one{display:block}
 @media print{.t-head,.rail{display:none}.wrap{display:block}}
+
+/* Sign-in station (nursery iPad) */
+.station{max-width:1180px;margin:0 auto}
+.st-top{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap}
+.st-top h2{margin:2px 0 4px;font-size:clamp(1.6rem,3vw,2.2rem)}
+.st-help{font-size:1.1rem;margin:10px 0 18px}
+.st-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:16px}
+.st-card{display:flex;flex-direction:column;align-items:center;gap:6px;text-align:center;font:inherit;color:var(--ink);background:var(--surface);
+  border:2px solid var(--line);border-radius:18px;padding:20px 14px;cursor:pointer;min-height:230px;transition:transform .1s}
+.st-card:active{transform:scale(.98)}
+.st-card.out{border-color:var(--accent)}
+.st-card.in{border-color:var(--ok);background:var(--ok-soft)}
+.st-card.done{opacity:.6;cursor:default}
+.st-name{font-weight:700;font-size:1.2rem;line-height:1.25}
+.st-when{color:var(--muted);font-size:.92rem}
+.st-state{font-size:.92rem}
+.st-act{margin-top:auto;font-weight:700;color:var(--accent)}
+.st-card.in .st-act{color:var(--ok)}
+.pinpad{position:fixed;inset:0;background:rgba(10,16,20,.55);z-index:80;display:grid;place-items:center;padding:16px}
+.pp-box{background:var(--surface);color:var(--ink);border-radius:20px;padding:24px 22px;width:min(380px,100%);text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.3)}
+.pp-box h2{margin:4px 0 6px}
+.pp-dots{display:flex;justify-content:center;gap:14px;margin:14px 0 4px}
+.pp-dots i{width:18px;height:18px;border-radius:50%;border:2px solid var(--ink)}
+.pp-dots i.on{background:var(--ink)}
+.pp-dots.busy{opacity:.5}
+.pp-keys{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:8px 0 14px}
+.pp-keys button{font:inherit;font-size:1.6rem;font-weight:600;padding:14px 0;border-radius:14px;border:1px solid var(--line);background:var(--bg);color:var(--ink);cursor:pointer}
+.pp-keys button[data-k="x"],.pp-keys button[data-k="b"]{font-size:1rem}
+.pp-keys button:active{background:var(--accent-soft)}
+.pp-done{padding:10px 0}
+.pp-tick{width:72px;height:72px;border-radius:50%;background:var(--ok);color:#fff;font-size:2.4rem;display:grid;place-items:center;margin:0 auto 10px}
+tr.late td{background:var(--bad-soft)}

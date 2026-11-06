@@ -100,6 +100,75 @@ export function assuranceFor(user, checks, training, quals = []) {
   };
 }
 
+// ---------- arrival and departure (sign-in station or phone) ----------
+const hex = b => [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, "0")).join("");
+async function pinHash(pin, saltHex) {
+  const salt = saltHex ? new Uint8Array(saltHex.match(/../g).map(h => parseInt(h, 16))) : crypto.getRandomValues(new Uint8Array(16));
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(pin), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations: 100000 }, key, 256);
+  return hex(salt) + ":" + hex(bits);
+}
+async function checkPin(env, email, pin) {
+  const since = new Date(Date.now() - 15 * 60000).toISOString();
+  const fails = (await env.DB.prepare("SELECT COUNT(*) n FROM pin_fails WHERE email=? AND at>?").bind(email, since).first()).n;
+  if (fails >= 5) bad("Too many wrong PINs. Wait 15 minutes, or the manager can confirm instead.");
+  const row = await env.DB.prepare("SELECT hash FROM station_pins WHERE email=?").bind(email).first();
+  if (!row) bad("This person hasn't set a sign-in PIN yet. The manager can confirm instead.");
+  if (!/^\d{4}$/.test(String(pin || "")) || (await pinHash(String(pin), row.hash.split(":")[0])) !== row.hash) {
+    await env.DB.prepare("INSERT INTO pin_fails(email,at) VALUES (?,?)").bind(email, nowIso()).run();
+    bad(fails >= 4 ? "Wrong PIN. Too many tries: wait 15 minutes, or the manager can confirm instead." : "That PIN isn't right. Try again.");
+  }
+  await env.DB.prepare("DELETE FROM pin_fails WHERE email=?").bind(email).run();
+}
+const ukTime = iso => ukNow(new Date(iso)).time;
+const metres = (a, b) => { const R = 6371000, r = x => x * Math.PI / 180, dLat = r(b.lat - a.lat), dLng = r(b.lng - a.lng);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(r(a.lat)) * Math.cos(r(b.lat)) * Math.sin(dLng / 2) ** 2; return 2 * R * Math.asin(Math.sqrt(h)); };
+async function branchLocation(env, c) {
+  if (c.lat != null && c.lng != null) return { lat: c.lat, lng: c.lng };
+  const pc = /\b([A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2})\b/i.exec(c.address || "");
+  if (!pc) return null;
+  try {
+    const r = await fetch("https://api.postcodes.io/postcodes/" + encodeURIComponent(pc[1].replace(/\s+/g, "")));
+    if (!r.ok) return null;
+    const j = await r.json();
+    if (j?.result?.latitude == null) return null;
+    await env.DB.prepare("UPDATE clients SET lat=?, lng=? WHERE id=?").bind(j.result.latitude, j.result.longitude, c.id).run();
+    return { lat: j.result.latitude, lng: j.result.longitude };
+  } catch { return null; }
+}
+// Records arrival or departure on a booked shift. Signing out also fills in the timesheet for the nursery to approve.
+async function clockShift(env, s, action, by, note, actor) {
+  const now = ukNow(), t = toMin(now.time), at = nowIso();
+  if (s.status !== "filled") bad("This shift isn't booked.");
+  if (s.date !== now.date) bad(s.date > now.date ? "You can only sign in on the day of the shift." : "This shift was on an earlier day. Add the hours in My hours instead.");
+  if (action === "in") {
+    if (s.clock_in_at) bad(`Already signed in at ${ukTime(s.clock_in_at)}.`);
+    if (t < toMin(s.start) - 60) bad(`Too early: signing in opens at ${String(Math.floor((toMin(s.start) - 60) / 60)).padStart(2, "0")}:${String((toMin(s.start) - 60) % 60).padStart(2, "0")}.`);
+    if (t > toMin(s.finish)) bad("This shift has already finished. Add the hours in My hours instead.");
+    await env.DB.prepare("UPDATE shifts SET clock_in_at=?, clock_in_by=?, clock_note=? WHERE id=? AND clock_in_at IS NULL").bind(at, by, note || null, s.id).run();
+  } else if (action === "out") {
+    if (!s.clock_in_at) bad("Sign in first.");
+    if (s.clock_out_at) bad(`Already signed out at ${ukTime(s.clock_out_at)}.`);
+    await env.DB.prepare("UPDATE shifts SET clock_out_at=?, clock_out_by=?, clock_note=COALESCE(clock_note||' · ','')||COALESCE(?,'') WHERE id=?").bind(at, by, note || null, s.id).run();
+    // Timesheet: paid from the booked start (or later, if they arrived late) to when they actually left.
+    const inT = ukTime(s.clock_in_at), outT = now.time;
+    const start = toMin(inT) > toMin(s.start) ? inT : s.start;
+    if (s.ts_status === "none" && toMin(outT) > toMin(start)) {
+      const brk = Math.min(s.break_min || 0, Math.max(0, toMin(outT) - toMin(start) - 1));
+      await env.DB.prepare("UPDATE shifts SET ts_status='submitted', act_start=?, act_finish=?, act_break=?, ts_submitted_at=?, ts_comment=? WHERE id=? AND ts_status='none'")
+        .bind(start, outT, brk, at, `From sign-in: arrived ${inT}, left ${outT}.`, s.id).run();
+    }
+  } else bad("Unknown action.");
+  await audit(env, actor, "clock_" + action, s.id, { by, note });
+  return { ok: true, time: now.time };
+}
+
+async function arrivalsToday(env, today, clientId) {
+  const { results } = await env.DB.prepare(`SELECT s.id,s.start,s.finish,s.clock_in_at,s.clock_out_at,s.clock_in_by,s.clock_note,c.name client_name,u.name worker_name,u.phone worker_phone
+    FROM shifts s JOIN clients c ON c.id=s.client_id JOIN users u ON u.email=s.worker_email WHERE s.date=? AND s.status='filled' ${clientId ? "AND s.client_id=?" : ""} ORDER BY s.start`).bind(...(clientId ? [today, clientId] : [today])).all();
+  const t = toMin(ukNow().time);
+  return results.map(r => ({ ...r, late: !r.clock_in_at && t > toMin(r.start) + 15 && t < toMin(r.finish) }));
+}
 // ---------- Childcare 101 (lives in the Hub; progress keyed by email) ----------
 async function trainingContent(env) {
   const r = await env.DB.prepare("SELECT value FROM settings WHERE key='training_content'").first();
@@ -394,7 +463,7 @@ async function api(req, env, url) {
     if (role === "staff") {
       const checks = (await checksFor(env, [me.email]))[me.email];
       const training = (await trainingFor(env, [me]))[me.email];
-      Object.assign(out, { checks, training, qual_level: me.qual_level, blockers: blockers(me, checks, training, null), expiring: expiringFor(checks, today), quals: (await qualsFor(env, [me.email]))[me.email], has_photo: (await photoSet(env, [me.email])).has(me.email) });
+      Object.assign(out, { checks, training, qual_level: me.qual_level, blockers: blockers(me, checks, training, null), expiring: expiringFor(checks, today), quals: (await qualsFor(env, [me.email]))[me.email], has_photo: (await photoSet(env, [me.email])).has(me.email), has_pin: !!(await env.DB.prepare("SELECT 1 FROM station_pins WHERE email=?").bind(me.email).first()) });
     }
     return json(out);
   }
@@ -584,6 +653,22 @@ async function api(req, env, url) {
       await env.DB.prepare("UPDATE shifts SET status='cancelled', cancelled_reason=? WHERE id=?").bind(clean(b.reason, 300) || null, id).run();
       await audit(env, me.email, "shift_cancel", id, { reason: b.reason, worker: s.worker_email });
       return json({ ok: true });
+    }
+
+    if (action === "clock" && method === "POST") {
+      need(mineAsStaff);
+      const b = await body();
+      const c = await env.DB.prepare("SELECT id,name,address,lat,lng FROM clients WHERE id=?").bind(s.client_id).first();
+      const here = { lat: Number(b.lat), lng: Number(b.lng) }, acc = Math.max(0, Number(b.acc) || 0);
+      if (!Number.isFinite(here.lat) || !Number.isFinite(here.lng) || (!here.lat && !here.lng)) bad("We need your location to check you're at the nursery. Allow location for the RSS Hub, or sign in on the nursery's sign-in station.");
+      const branch = await branchLocation(env, c);
+      let note = "Phone, location not checked (nursery location not set)";
+      if (branch) {
+        const d = Math.round(metres(here, branch));
+        if (d > 300 + Math.min(acc, 200)) bad(`You seem to be about ${d >= 1000 ? (d / 1000).toFixed(1) + " km" : d + " m"} from ${c.name}. Sign in when you get there, or use the nursery's sign-in station.`);
+        note = `Phone, ${d} m from nursery`;
+      }
+      return json(await clockShift(env, s, b.action, "phone", note, me.email));
     }
 
     if (action === "timesheet" && method === "POST") {
@@ -821,6 +906,45 @@ async function api(req, env, url) {
     return json({ ...sig, name: u?.name, email, kid_md: a.kid_md, terms_md: a.terms_md, published_at: a.published_at });
   }
 
+  // ===== sign-in station (nursery iPad) and sign-in PIN =====
+  if (p === "/api/me/pin" && method === "PUT") {
+    need(role === "staff");
+    const pin = String((await body()).pin || "");
+    if (!/^\d{4}$/.test(pin)) bad("Your PIN must be 4 numbers.");
+    if (/^(\d)\1{3}$/.test(pin) || ["1234", "4321", "0123", "2580"].includes(pin)) bad("That PIN is too easy to guess. Choose another.");
+    await env.DB.prepare("INSERT INTO station_pins(email,hash,set_at) VALUES (?,?,?) ON CONFLICT(email) DO UPDATE SET hash=excluded.hash, set_at=excluded.set_at").bind(me.email, await pinHash(pin), nowIso()).run();
+    await audit(env, me.email, "pin_set", me.email, null);
+    return json({ ok: true });
+  }
+  if (p.startsWith("/api/station")) {
+    need(role === "manager" || isAdmin);
+    const cid = role === "manager" ? me.client_id : Number(url.searchParams.get("client_id"));
+    const client = cid && await env.DB.prepare("SELECT id,name,address,lat,lng FROM clients WHERE id=?").bind(cid).first();
+    if (!client) bad("Choose a nursery.");
+    if (p === "/api/station" && method === "GET") {
+      const { results } = await env.DB.prepare(`SELECT s.id,s.date,s.start,s.finish,s.break_min,s.room,s.worker_email,s.clock_in_at,s.clock_out_at,s.clock_in_by,s.clock_out_by,u.name worker_name,
+        (SELECT 1 FROM station_pins sp WHERE sp.email=s.worker_email) has_pin, (SELECT 1 FROM photos ph WHERE ph.email=s.worker_email) has_photo
+        FROM shifts s JOIN users u ON u.email=s.worker_email WHERE s.client_id=? AND s.date=? AND s.status='filled' ORDER BY s.start, u.name`).bind(client.id, today).all();
+      return json({ client: { id: client.id, name: client.name, located: client.lat != null }, date: today, time: ukNow().time, shifts: results.map(r => ({ ...r, has_pin: !!r.has_pin, has_photo: !!r.has_photo })) });
+    }
+    if (p === "/api/station/clock" && method === "POST") {
+      const b = await body();
+      const s = await env.DB.prepare("SELECT * FROM shifts WHERE id=? AND client_id=?").bind(Number(b.shift_id), client.id).first();
+      if (!s) bad("That shift isn't at this nursery.");
+      if (b.manager_confirm === true) return json(await clockShift(env, s, b.action, "manager", `Confirmed by ${me.name}`, me.email));
+      await checkPin(env, s.worker_email, b.pin);
+      return json(await clockShift(env, s, b.action, "pin", null, me.email));
+    }
+    if (p === "/api/station/location" && method === "POST") {
+      const b = await body(), lat = Number(b.lat), lng = Number(b.lng);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) bad("Couldn't read this device's location.");
+      await env.DB.prepare("UPDATE clients SET lat=?, lng=? WHERE id=?").bind(lat, lng, client.id).run();
+      await audit(env, me.email, "branch_location_set", client.id, { lat, lng, acc: b.acc });
+      return json({ ok: true });
+    }
+    return fail(404, "Not found");
+  }
+
   // ===== Childcare 101 =====
   if (p === "/api/training" && method === "GET") {
     need(role === "staff" || isAdmin);
@@ -956,6 +1080,7 @@ async function api(req, env, url) {
       queried: await q("SELECT COUNT(*) n FROM shifts WHERE ts_status='queried'"),
       toInvoice: await q("SELECT COUNT(*) n FROM shifts WHERE ts_status='approved' AND invoice_id IS NULL AND status='filled'"),
       pendingChecks: await q("SELECT COUNT(*) n FROM checks c JOIN users u ON u.email=c.email WHERE c.status='pending' AND u.active=1"),
+      arrivals: await arrivalsToday(env, today),
       staffCount: staff.length, readyCount: staff.length - notReady.length, notReady, expiring: expiring.sort((a, b) => a.expires_on.localeCompare(b.expires_on)),
     });
   }

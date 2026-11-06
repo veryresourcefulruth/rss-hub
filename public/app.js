@@ -39,7 +39,7 @@ let me = null, view = null, cache = {};
 const isAdmin = () => me && (me.role === "owner" || me.role === "coordinator");
 const TABS = {
   staff: [["shifts", "My shifts"], ["hours", "My hours"], ["checks", "My checks"], ["training", "Training"]],
-  manager: [["shifts", "Our shifts"], ["staff", "Our staff"], ["request", "Request cover"], ["hours", "Sign off hours"]],
+  manager: [["shifts", "Our shifts"], ["station", "Sign-in station"], ["staff", "Our staff"], ["request", "Request cover"], ["hours", "Sign off hours"]],
   admin: [["today", "Today"], ["shifts", "Shifts"], ["staff", "Staff"], ["nurseries", "Nurseries"], ["billing", "Hours & billing"], ["training", "Training"], ["settings", "Settings"]],
 };
 const tabsFor = () => TABS[isAdmin() ? "admin" : me.role];
@@ -52,7 +52,7 @@ async function boot() {
     $("#foot").innerHTML = `<span></span><a href="/cdn-cgi/access/logout">Sign out</a>`; return;
   }
   const hash = location.hash.slice(1);
-  view = tabsFor().some(t => t[0] === hash) || (me.role === "staff" && hash === "terms") ? hash : tabsFor()[0][0];
+  view = tabsFor().some(t => t[0] === hash) || (me.role === "staff" && hash === "terms") || (isAdmin() && hash === "station") ? hash : tabsFor()[0][0];
   $("#foot").innerHTML = `<span>Signed in as ${esc(me.name)} (${esc(me.email)})${me.client ? " · " + esc(me.client.name) : ""}</span><a href="/cdn-cgi/access/logout">Sign out</a>`;
   render();
 }
@@ -364,10 +364,11 @@ const STAFF = {
       ${s.blockers.length ? `<div class="note" style="color:var(--bad);font-weight:600">You can't take this shift yet:</div><ul class="blk">${s.blockers.map(b => `<li>${esc(b)}</li>`).join("")}</ul>` : `<div class="row" style="margin-top:6px"><button class="btn sm" data-accept="${s.id}">Accept this shift</button><span class="err" id="ae${s.id}"></span></div>`}
     </div>`).join("") : `<p class="empty">No open shifts right now. New shifts appear here as soon as RSS offers them.</p>`}</div>
     <div class="section-h" style="margin-top:28px"><h2>Your upcoming shifts</h2></div>
+    ${upcoming.length && !me.has_pin ? `<div class="callout"><b>Set your sign-in PIN.</b> You'll type it on the nursery's sign-in iPad when you arrive and leave. <button class="btn sm" id="setPin">Set PIN</button></div>` : ""}
     <div class="cards">${upcoming.length ? upcoming.map(s => `<div class="card ok"><div class="section-h" style="margin:0"><h4>${esc(s.client_name)}</h4>${shiftWhen(s)}</div>
-      <div class="meta">${shiftReqs(s)} · ${hrs(s.mins)} · Pay ${gbp(s.pay_rate)}/h</div>${s.notes ? `<div class="note">${esc(s.notes)}</div>` : ""}</div>`).join("") : `<p class="empty">Nothing booked yet.</p>`}</div>
+      <div class="meta">${clockPill(s)}${shiftReqs(s)} · ${hrs(s.mins)} · Pay ${gbp(s.pay_rate)}/h</div>${s.notes ? `<div class="note">${esc(s.notes)}</div>` : ""}${phoneClockHtml(s)}</div>`).join("") : `<p class="empty">Nothing booked yet.</p>`}</div>
     <p class="note" style="margin-top:20px">Can't make a booked shift? Call RSS straight away. Don't contact the nursery's parent line or just not turn up.</p>`;
-    wireOutstanding();
+    wireOutstanding(); wirePhoneClock(); wirePinRow();
     $$("[data-confirm]").forEach(b => b.onclick = async () => {
       if (await act(b, () => api(`/api/shifts/${b.dataset.confirm}/accept`, { method: "POST", body: {} }), $("#ce" + b.dataset.confirm))) { toast("Confirmed. The nursery can now see you're coming."); render(); }
     });
@@ -404,11 +405,13 @@ const STAFF = {
     ${me.blockers.length ? outstandingHtml(me.blockers, false) : `<p class="note">All required checks and training are verified. Keep your certificates in date so you can keep picking up shifts.</p>`}
     <div class="check-row"><div><b>Childcare 101 training</b><div class="note">${t.passed ? `${t.passed} of ${t.total} modules passed${t.declaredAt ? ", declaration signed" : ""}` : "Not started yet. It takes about 3 hours, and you can stop and carry on any time."}</div></div>
       ${t.complete ? `<button class="btn ghost sm" id="toTraining2">View certificate</button>` : `<button class="btn sm" id="toTraining2">${t.passed ? "Carry on" : "Start training"}</button>`}</div>
+    ${pinRowHtml()}
     ${expiringHtml(me.expiring)}
     ${checkRows(me.checks, k => k === "terms" ? `<button class="btn ${me.checks.terms?.status === "verified" ? "ghost " : ""}sm" id="toTerms2">${me.checks.terms?.status === "verified" ? "View signed terms" : "Read and sign"}</button>` : `<button class="btn ghost sm" data-ck="${k}">${me.checks[k] ? "View / update" : "Add"}</button>`)}
     ${qualRows(me.quals, true)}</div>`;
     wirePhoto($("#app"), me.email, () => render());
     wireOutstanding(); $("#toTerms2").onclick = () => go("terms");
+    wirePinRow();
     $("#toTraining2").onclick = () => { T.sub = t.complete ? "cert" : "learn"; go("training"); };
     $$("[data-qual]").forEach(b => b.onclick = () => qualDrawer(me.email, me.quals.find(q => q.id == b.dataset.qual), false, () => { closeDrawer(); render(); }));
     $$("[data-ck]").forEach(b => b.onclick = () => openDrawer(checkForm(me.email, b.dataset.ck, me.checks[b.dataset.ck], false), root => wireCheckForm(root, me.email, b.dataset.ck, false, () => { closeDrawer(); render(); })));
@@ -504,12 +507,13 @@ function profileHtml(a) {
     <p class="note">RSS keeps the documents behind these checks. Contact RSS if you need written confirmation.</p>`;
 }
 const MANAGER = {
+  station: () => stationView(),
   async shifts() {
     const list = await api(`/api/shifts?from=${shiftBack(14)}`);
     const up = list.filter(s => s.date >= me.today && s.status !== "cancelled"), past = list.filter(s => s.date < me.today && s.status === "filled").reverse();
     $("#app").innerHTML = `<div class="section-h"><h2>Coming up at ${esc(me.client.name)}</h2><button class="btn" id="newReq">Request cover</button></div>
     <div class="cards">${up.length ? up.map(s => `<div class="card ${s.status === "filled" ? "ok" : "attn"}">
-      <div class="section-h" style="margin:0">${shiftWhen(s)}${pill(STATUS[s.status])}</div>
+      <div class="section-h" style="margin:0">${shiftWhen(s)}<span>${pill(STATUS[s.status])} ${clockPill(s)}</span></div>
       <div class="meta">${shiftReqs(s)}</div>
       ${s.worker_name ? `<div style="display:flex;gap:12px;align-items:center">${avatar(s.assurance?.photo, s.worker_name, 52)}<div><b>${esc(s.worker_name)}</b> ${s.status === "pending" ? "has been asked and hasn't confirmed yet." : "is coming."} <button class="link-btn" data-prof="${s.id}">Full profile</button></div></div>${assuranceHtml(s.assurance)}` : `<div class="note">RSS is finding someone for this shift.</div>`}${declinedHtml(s)}
       <div class="row" style="margin-top:4px"><button class="link-btn danger" data-cancel="${s.id}">Cancel this shift</button></div></div>`).join("") : `<p class="empty">No cover booked. Use Request cover when you need someone.</p>`}</div>
@@ -589,6 +593,7 @@ async function signOffList(path) {
    RSS OFFICE
    ===================================================================== */
 const ADMIN = {
+  station: () => stationView(),
   training: () => trainingAdmin(),
   async today() {
     const d = await api("/api/dashboard");
@@ -599,11 +604,15 @@ const ADMIN = {
       ${card(d.toSubmit, "past shifts with no hours yet", "billing", 1)}${card(d.awaiting, "hours waiting for nursery sign-off", "billing")}${card(d.queried, "hours queried", "billing", 1)}
       ${card(d.toInvoice, "approved shifts not yet invoiced", "billing", 1)}${card(d.pendingChecks, "documents waiting for your check", "staff", 1)}${card(`${d.readyCount}/${d.staffCount}`, "staff ready to book", "staff")}
     </div>
+    <div class="panel" style="margin-top:24px"><div class="section-h" style="margin:0 0 8px"><h3 style="margin:0">Today's arrivals</h3><button class="btn ghost sm" id="toStation">Open a sign-in station</button></div>
+      ${d.arrivals.length ? `<div class="tbl"><table><thead><tr><th>Worker</th><th>Nursery</th><th>Booked</th><th>Arrived</th><th>Left</th></tr></thead><tbody>${d.arrivals.map(a => `<tr${a.late ? ` class="late"` : ""}><td><b>${esc(a.worker_name)}</b>${a.late && a.worker_phone ? ` <a href="tel:${esc(a.worker_phone)}">Call</a>` : ""}</td><td>${esc(a.client_name)}</td><td class="n">${a.start}–${a.finish}</td>
+        <td class="n">${a.clock_in_at ? ukClock(a.clock_in_at) + (a.clock_in_by === "phone" ? " 📱" : a.clock_in_by === "manager" ? " (manager)" : "") : a.late ? `<b style="color:var(--bad)">Not arrived</b>` : "–"}</td><td class="n">${a.clock_out_at ? ukClock(a.clock_out_at) : "–"}</td></tr>`).join("")}</tbody></table></div>` : `<p class="empty">Nobody is booked today.</p>`}</div>
     <div class="grid2" style="margin-top:24px">
       <div class="panel"><h3 style="margin-top:0">Not ready to book</h3>${d.notReady.length ? d.notReady.map(u => `<div class="check-row"><div><b>${esc(u.name)}</b><ul class="blk">${u.blockers.map(b => `<li>${esc(b)}</li>`).join("")}</ul></div><button class="btn ghost sm" data-staff="${esc(u.email)}">Open</button></div>`).join("") : `<p class="empty">Everyone is ready.</p>`}</div>
       <div class="panel"><h3 style="margin-top:0">Training &amp; certificates expired or due in 30 days</h3>${d.expiring.length ? d.expiring.map(x => `<div class="check-row"><div><b>${esc(x.name)}</b><div class="note">${esc(x.label)} · ${x.expired ? "<b style='color:var(--bad)'>expired</b> " : ""}${fullDate(x.expires_on)}</div></div><button class="btn ghost sm" data-staff="${esc(x.email)}">Open</button></div>`).join("") : `<p class="empty">Nothing expiring soon.</p>`}</div>
     </div>`;
     $$("[data-go]").forEach(b => b.onclick = () => go(b.dataset.go));
+    $("#toStation").onclick = () => go("station");
     $$("[data-staff]").forEach(b => b.onclick = () => staffDrawer(b.dataset.staff));
   },
 
@@ -622,7 +631,7 @@ const ADMIN = {
     ${clients.length ? "" : `<div class="callout">Add your nurseries first, in the Nurseries tab.</div>`}
     <div class="cards">${rows.length ? rows.map(s => `<button class="card ${s.status === "requested" ? "attn" : s.status === "filled" ? "ok" : ""}" data-shift="${s.id}" style="text-align:left;cursor:pointer;font:inherit;color:inherit">
       <div class="section-h" style="margin:0;width:100%"><h4>${esc(s.client_name)}</h4>${shiftWhen(s)}</div>
-      <div class="meta">${pill(STATUS[s.status])}${TS[s.ts_status] ? pill(TS[s.ts_status]) : ""}<span>${shiftReqs(s)}</span>${s.worker_name ? `<b style="color:var(--ink)">${esc(s.worker_name)}</b>` : ""}</div></button>`).join("") : `<p class="empty">No shifts to show.</p>`}</div>`;
+      <div class="meta">${pill(STATUS[s.status])}${clockPill(s)}${TS[s.ts_status] ? pill(TS[s.ts_status]) : ""}<span>${shiftReqs(s)}</span>${s.worker_name ? `<b style="color:var(--ink)">${esc(s.worker_name)}</b>` : ""}</div></button>`).join("") : `<p class="empty">No shifts to show.</p>`}</div>`;
     $("#f_show").onchange = e => { cache.shiftFilter = { ...f, show: e.target.value }; render(); };
     $("#f_client").onchange = e => { cache.shiftFilter = { ...f, client: e.target.value }; render(); };
     $("#newShift").onclick = () => openDrawer(`<p class="eyebrow">New shift</p><h2>Add a shift</h2>${shiftFormHtml({ date: me.today, start: "08:00", finish: "18:00", break_min: 60, client_id: clients[0]?.id }, { count: true, clients })}
@@ -779,7 +788,7 @@ async function shiftDrawer(id) {
   const pendingHtml = s.status === "pending" ? `<div class="panel" style="padding:16px"><b>${esc(s.worker_name)}</b> has been asked to work this shift and hasn't confirmed yet${s.assigned_at ? ` (asked ${new Date(s.assigned_at).toLocaleString("en-GB", { dateStyle: "short", timeStyle: "short" })})` : ""}.
      <div class="note">${esc(s.worker_email)}${s.worker_phone ? " · " + esc(s.worker_phone) : ""}. It's on their My shifts page to accept or decline.</div>
      <div class="row" style="margin-top:8px"><button class="btn ghost sm" id="sd_un">Withdraw and ask someone else</button></div><p class="err" id="sd_err1"></p></div>` : "";
-  setDrawer(`<p class="eyebrow">Shift #${s.id} · ${pill(STATUS[s.status])} ${TS[s.ts_status] ? pill(TS[s.ts_status]) : ""}</p>
+  setDrawer(`<p class="eyebrow">Shift #${s.id} · ${pill(STATUS[s.status])} ${clockPill(s)} ${TS[s.ts_status] ? pill(TS[s.ts_status]) : ""}</p>${s.clock_in_at ? `<p class="note">Arrived ${ukClock(s.clock_in_at)} (${{ pin: "sign-in station, PIN", manager: "confirmed by manager", phone: "own phone" }[s.clock_in_by] || s.clock_in_by})${s.clock_out_at ? ` · left ${ukClock(s.clock_out_at)} (${{ pin: "sign-in station, PIN", manager: "confirmed by manager", phone: "own phone" }[s.clock_out_by] || s.clock_out_by})` : ""}${s.clock_note ? ` · ${esc(s.clock_note)}` : ""}</p>` : ""}
   <h2>${esc(s.client_name)}</h2><p>${shiftWhen(s)} · ${hrs(s.mins)}</p>
   ${s.requested_by ? `<p class="note">Requested by ${esc(s.requested_by)} on ${fullDate(s.created_at)}.${s.cancelled_reason ? " Cancelled: " + esc(s.cancelled_reason) : ""}</p>` : ""}
   ${pendingHtml}${declinedHtml(s)}

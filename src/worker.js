@@ -100,28 +100,113 @@ export function assuranceFor(user, checks, training, quals = []) {
   };
 }
 
-async function trainingFor(env, users) {
-  // Childcare 101 completion, read from the training app's database.
-  const out = {};
-  if (!env.TRAINING || !users.length) return out;
+// ---------- Childcare 101 (lives in the Hub; progress keyed by email) ----------
+async function trainingContent(env) {
+  const r = await env.DB.prepare("SELECT value FROM settings WHERE key='training_content'").first();
+  if (r) return JSON.parse(r.value);
+  // First use: copy the course from the old training app's database.
+  const old = env.TRAINING && await env.TRAINING.prepare("SELECT value FROM settings WHERE key='content'").first();
+  if (!old) throw new Error("The Childcare 101 course hasn't been set up yet.");
+  await env.DB.prepare("INSERT OR IGNORE INTO settings(key,value) VALUES ('training_content',?)").bind(old.value).run();
+  return JSON.parse(old.value);
+}
+const passMark = (c, m) => (m.critical ? 100 : c.pass || 80);
+const publicTraining = c => ({
+  pass: c.pass, classes: c.classes, declaration: c.declaration,
+  modules: c.modules.map(m => ({ ...m, quiz: m.quiz.map(q => ({ q: q.q, o: q.o })) })),
+});
+
+// Carry over progress from the old training app (matched once by name, or by the "name used in training" field).
+async function importLegacyTraining(env, users) {
+  if (!env.TRAINING || !users.length) return;
+  const emails = users.map(u => u.email);
+  const have = new Set((await env.DB.prepare(`SELECT email FROM training_status WHERE email IN (${emails.map(() => "?").join(",")})`).bind(...emails).all()).results.map(r => r.email));
+  const todo = users.filter(u => !have.has(u.email));
+  if (!todo.length) return;
   try {
-    const c = await env.TRAINING.prepare("SELECT value FROM settings WHERE key='content'").first();
-    const mods = c ? JSON.parse(c.value).modules.map(m => m.id) : [];
-    const keys = users.map(u => nameKey(u.training_name || u.name));
-    const ph = keys.map(() => "?").join(",");
-    const { results: ts } = await env.TRAINING.prepare(`SELECT id,name_key,declared_at FROM trainees WHERE name_key IN (${ph})`).bind(...keys).all();
-    const ids = ts.map(t => t.id);
-    let passed = [];
-    if (ids.length) passed = (await env.TRAINING.prepare(`SELECT trainee_id,module_id FROM results WHERE passed=1 AND trainee_id IN (${ids.map(() => "?").join(",")})`).bind(...ids).all()).results;
+    const keys = [...new Set(todo.map(u => nameKey(u.training_name || u.name)))];
+    const { results: ts } = await env.TRAINING.prepare(`SELECT id,name_key,created_at,last_seen_at,declared_at FROM trainees WHERE name_key IN (${keys.map(() => "?").join(",")})`).bind(...keys).all();
+    if (!ts.length) return;
+    const taken = new Set((await env.DB.prepare(`SELECT legacy_trainee_id id FROM training_status WHERE legacy_trainee_id IN (${ts.map(() => "?").join(",")})`).bind(...ts.map(t => t.id)).all()).results.map(r => r.id));
+    for (const u of todo) {
+      const t = ts.find(x => x.name_key === nameKey(u.training_name || u.name) && !taken.has(x.id));
+      if (!t) continue;
+      taken.add(t.id);
+      await copyLegacy(env, t, u.email);
+    }
+  } catch (e) { console.error("legacy training import", e); }
+}
+async function copyLegacy(env, t, email) {
+  const { results: rs } = await env.TRAINING.prepare("SELECT * FROM results WHERE trainee_id=?").bind(t.id).all();
+  await env.DB.batch([
+    env.DB.prepare(`INSERT INTO training_status(email,started_at,declared_at,last_seen_at,legacy_trainee_id) VALUES (?,?,?,?,?)
+      ON CONFLICT(email) DO UPDATE SET started_at=MIN(started_at,excluded.started_at), declared_at=COALESCE(declared_at,excluded.declared_at), legacy_trainee_id=excluded.legacy_trainee_id`)
+      .bind(email, t.created_at, t.declared_at, t.last_seen_at, t.id),
+    ...rs.map(r => env.DB.prepare(`INSERT INTO training_results(email,module_id,attempts,best,passed,passed_at,last_at) VALUES (?,?,?,?,?,?,?)
+      ON CONFLICT(email,module_id) DO UPDATE SET attempts=attempts+excluded.attempts, best=MAX(best,excluded.best), passed=MAX(passed,excluded.passed),
+      passed_at=COALESCE(passed_at,excluded.passed_at), last_at=MAX(COALESCE(last_at,''),COALESCE(excluded.last_at,''))`)
+      .bind(email, r.module_id, r.attempts, r.best, r.passed, r.passed_at, r.last_at)),
+  ]);
+}
+
+async function trainingFor(env, users) {
+  const out = {};
+  if (!users.length) return out;
+  try {
+    await importLegacyTraining(env, users);
+    const mods = (await trainingContent(env)).modules.map(m => m.id);
+    const emails = users.map(u => u.email), ph = emails.map(() => "?").join(",");
+    const st = (await env.DB.prepare(`SELECT email,declared_at FROM training_status WHERE email IN (${ph})`).bind(...emails).all()).results;
+    const passed = (await env.DB.prepare(`SELECT email,module_id FROM training_results WHERE passed=1 AND email IN (${ph})`).bind(...emails).all()).results;
     for (const u of users) {
-      const t = ts.find(x => x.name_key === nameKey(u.training_name || u.name));
-      if (!t) { out[u.email] = { found: false, complete: false, passed: 0, total: mods.length }; continue; }
-      const mine = new Set(passed.filter(p => p.trainee_id === t.id).map(p => p.module_id));
+      const s = st.find(x => x.email === u.email);
+      const mine = new Set(passed.filter(p => p.email === u.email).map(p => p.module_id));
       const n = mods.filter(m => mine.has(m)).length;
-      out[u.email] = { found: true, passed: n, total: mods.length, declaredAt: t.declared_at, complete: n === mods.length && !!t.declared_at };
+      out[u.email] = { found: !!s, passed: n, total: mods.length, declaredAt: s?.declared_at || null, complete: n === mods.length && !!s?.declared_at };
     }
   } catch (e) { console.error("training lookup", e); }
   return out;
+}
+async function trainingView(env, email) {
+  const s = await env.DB.prepare("SELECT * FROM training_status WHERE email=?").bind(email).first();
+  const { results } = await env.DB.prepare("SELECT * FROM training_results WHERE email=?").bind(email).all();
+  const modules = {};
+  for (const r of results) modules[r.module_id] = { attempts: r.attempts, best: r.best, passed: !!r.passed, passedAt: r.passed_at, lastAt: r.last_at };
+  return { startedAt: s?.started_at || null, declaredAt: s?.declared_at || null, modules };
+}
+function validateTraining(c) {
+  const err = m => { throw new HttpError(400, m); };
+  const txt = (s, max) => String(s || "").replace(/\s+/g, " ").trim().slice(0, max);
+  if (!c || typeof c !== "object") err("Content is missing.");
+  const pass = Number(c.pass);
+  if (!(pass >= 50 && pass <= 100)) err("Pass mark must be between 50 and 100.");
+  if (!Array.isArray(c.classes) || !c.classes.length) err("At least one class is needed.");
+  const classIds = new Set(c.classes.map(x => x.id));
+  if (!Array.isArray(c.modules) || !c.modules.length) err("At least one module is needed.");
+  const ids = new Set();
+  c.modules.forEach((m, i) => {
+    const where = `Module ${i + 1}`;
+    if (!m.id || ids.has(m.id)) err(`${where} has a missing or duplicate id.`); ids.add(m.id);
+    if (!classIds.has(m.cls)) err(`${where} is in a class that doesn't exist.`);
+    if (!txt(m.title, 200)) err(`${where} needs a title.`);
+    if (!Array.isArray(m.quiz) || !m.quiz.length) err(`${where} needs at least one quiz question.`);
+    m.quiz.forEach((q, qi) => {
+      if (!txt(q.q, 2000)) err(`${where}, question ${qi + 1} has no text.`);
+      if (!Array.isArray(q.o) || q.o.length < 2 || q.o.some(o => !txt(o, 1000))) err(`${where}, question ${qi + 1} needs at least two filled-in options.`);
+      if (!(Number.isInteger(q.a) && q.a >= 0 && q.a < q.o.length)) err(`${where}, question ${qi + 1} has no correct answer marked.`);
+    });
+  });
+  if (!Array.isArray(c.declaration) || !c.declaration.length) err("Keep at least one declaration statement.");
+  if (JSON.stringify(c).length > 900000) err("The course content is too large to save.");
+  return {
+    pass, classes: c.classes.map(x => ({ id: String(x.id), name: txt(x.name, 120) })),
+    declaration: c.declaration.map(d => txt(d, 500)).filter(Boolean),
+    modules: c.modules.map(m => ({
+      id: String(m.id), cls: String(m.cls), title: txt(m.title, 200), mins: Math.min(240, Math.max(5, Number(m.mins) || 15)),
+      critical: !!m.critical, intro: String(m.intro || "").slice(0, 2000), body: String(m.body || ""),
+      quiz: m.quiz.map(q => ({ q: String(q.q).trim(), o: q.o.map(o => String(o).trim()), a: q.a, w: String(q.w || "").trim() })),
+    })),
+  };
 }
 
 async function checksFor(env, emails) {
@@ -736,8 +821,95 @@ async function api(req, env, url) {
     return json({ ...sig, name: u?.name, email, kid_md: a.kid_md, terms_md: a.terms_md, published_at: a.published_at });
   }
 
+  // ===== Childcare 101 =====
+  if (p === "/api/training" && method === "GET") {
+    need(role === "staff" || isAdmin);
+    const c = await trainingContent(env);
+    if (isAdmin) return json({ content: c, preview: true });
+    await importLegacyTraining(env, [me]);
+    await env.DB.prepare("UPDATE training_status SET last_seen_at=? WHERE email=?").bind(nowIso(), me.email).run();
+    return json({ content: publicTraining(c), progress: await trainingView(env, me.email) });
+  }
+  if (p === "/api/training/quiz" && method === "POST") {
+    need(role === "staff");
+    const b = await body(), c = await trainingContent(env);
+    const idx = c.modules.findIndex(m => m.id === b.moduleId);
+    if (idx < 0) return fail(404, "That module no longer exists. Reload the page.");
+    const m = c.modules[idx], mine = await trainingView(env, me.email);
+    for (let i = 0; i < idx; i++) if (!mine.modules[c.modules[i].id]?.passed) return fail(403, "Pass the earlier modules first.");
+    const ans = Array.isArray(b.answers) ? b.answers : [];
+    if (ans.length !== m.quiz.length || ans.some(a => !Number.isInteger(a))) bad("Answer every question before submitting. If you have, reload the page: the quiz may have been updated.");
+    const right = m.quiz.filter((q, i) => ans[i] === q.a).length;
+    const score = Math.round((right / m.quiz.length) * 100), mark = passMark(c, m), ok = score >= mark, now = nowIso();
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO training_status(email,started_at,last_seen_at) VALUES (?,?,?) ON CONFLICT(email) DO UPDATE SET last_seen_at=excluded.last_seen_at").bind(me.email, now, now),
+      env.DB.prepare(`INSERT INTO training_results(email,module_id,attempts,best,passed,passed_at,last_at) VALUES (?,?,1,?,?,?,?)
+        ON CONFLICT(email,module_id) DO UPDATE SET attempts=attempts+1, best=MAX(best,excluded.best), passed=MAX(passed,excluded.passed),
+        passed_at=COALESCE(passed_at,excluded.passed_at), last_at=excluded.last_at`).bind(me.email, m.id, score, ok ? 1 : 0, ok ? now : null, now),
+    ]);
+    return json({ score, passed: ok, passMark: mark, feedback: m.quiz.map(q => ({ a: q.a, w: q.w })), progress: await trainingView(env, me.email) });
+  }
+  if (p === "/api/training/declare" && method === "POST") {
+    need(role === "staff");
+    const c = await trainingContent(env), mine = await trainingView(env, me.email);
+    if (!c.modules.every(m => mine.modules[m.id]?.passed)) return fail(403, "Pass every module before signing the declaration.");
+    await env.DB.prepare("UPDATE training_status SET declared_at=COALESCE(declared_at,?) WHERE email=?").bind(nowIso(), me.email).run();
+    await audit(env, me.email, "childcare101_declared", me.email, {});
+    return json({ progress: await trainingView(env, me.email) });
+  }
+
   // ===== admin only below =====
   need(isAdmin);
+
+  if (p === "/api/training/content" && method === "PUT") {
+    const c = validateTraining(await body());
+    await env.DB.prepare("INSERT INTO settings(key,value) VALUES ('training_content',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(JSON.stringify(c)).run();
+    await audit(env, me.email, "training_content_saved", null, { modules: c.modules.length });
+    return json(c);
+  }
+  if (p === "/api/training/tracker" && method === "GET") {
+    const c = await trainingContent(env);
+    const { results: staff } = await env.DB.prepare("SELECT email,name,training_name,active FROM users WHERE role='staff' ORDER BY active DESC, name").all();
+    await importLegacyTraining(env, staff);
+    const { results: st } = await env.DB.prepare("SELECT * FROM training_status").all();
+    const { results: rs } = await env.DB.prepare("SELECT * FROM training_results").all();
+    const people = staff.map(u => {
+      const s = st.find(x => x.email === u.email), mods = {};
+      for (const r of rs.filter(r => r.email === u.email)) mods[r.module_id] = { attempts: r.attempts, best: r.best, passed: !!r.passed, passedAt: r.passed_at };
+      return { email: u.email, name: u.name, active: !!u.active, startedAt: s?.started_at || null, declaredAt: s?.declared_at || null, lastSeenAt: s?.last_seen_at || null, modules: mods };
+    });
+    // Old training-app records nobody has been matched to yet, so RSS can link them by hand.
+    let unlinked = [];
+    if (env.TRAINING) try {
+      const linked = new Set(st.map(s => s.legacy_trainee_id).filter(Boolean));
+      const { results: ts } = await env.TRAINING.prepare("SELECT id,name,created_at,declared_at,(SELECT COUNT(*) FROM results r WHERE r.trainee_id=t.id AND r.passed=1) passed FROM trainees t ORDER BY name COLLATE NOCASE").all();
+      unlinked = ts.filter(t => !linked.has(t.id));
+    } catch (e) { console.error("unlinked trainees", e); }
+    return json({ modules: c.modules.map(m => ({ id: m.id, title: m.title })), people, unlinked });
+  }
+  if (p === "/api/training/link" && method === "POST") {
+    const b = await body();
+    const u = await env.DB.prepare("SELECT email FROM users WHERE email=? AND role='staff'").bind(String(b.email || "").toLowerCase()).first();
+    if (!u) bad("Choose a staff member.");
+    const t = env.TRAINING && await env.TRAINING.prepare("SELECT id,created_at,last_seen_at,declared_at FROM trainees WHERE id=?").bind(String(b.trainee_id || "")).first();
+    if (!t) bad("That training record no longer exists.");
+    if (await env.DB.prepare("SELECT 1 FROM training_status WHERE legacy_trainee_id=?").bind(t.id).first()) bad("That training record is already linked to someone.");
+    const ex = await env.DB.prepare("SELECT legacy_trainee_id FROM training_status WHERE email=?").bind(u.email).first();
+    if (ex?.legacy_trainee_id) bad("That staff member already has an old training record linked.");
+    await copyLegacy(env, t, u.email);
+    await audit(env, me.email, "training_linked", u.email, { trainee_id: t.id });
+    return json({ ok: true });
+  }
+  if ((m = /^\/api\/training\/progress\/([^/]+)$/.exec(p)) && method === "DELETE") {
+    need(role === "owner");
+    const email = decodeURIComponent(m[1]).toLowerCase();
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM training_results WHERE email=?").bind(email),
+      env.DB.prepare("UPDATE training_status SET declared_at=NULL WHERE email=?").bind(email),
+    ]);
+    await audit(env, me.email, "training_reset", email, {});
+    return json({ ok: true });
+  }
 
   if (p === "/api/agreement/signatures" && method === "GET") {
     const a = await currentAgreement(env);
@@ -844,6 +1016,8 @@ async function api(req, env, url) {
       env.DB.prepare("UPDATE quals SET email=? WHERE email=?").bind(to, from),
       env.DB.prepare("UPDATE photos SET email=? WHERE email=?").bind(to, from),
       env.DB.prepare("UPDATE signatures SET email=? WHERE email=?").bind(to, from),
+      env.DB.prepare("UPDATE training_status SET email=? WHERE email=?").bind(to, from),
+      env.DB.prepare("UPDATE training_results SET email=? WHERE email=?").bind(to, from),
       env.DB.prepare("UPDATE shifts SET worker_email=? WHERE worker_email=?").bind(to, from),
       env.DB.prepare("UPDATE shifts SET requested_by=? WHERE requested_by=?").bind(to, from),
       env.DB.prepare("UPDATE shifts SET offered_to=REPLACE(offered_to, ?, ?) WHERE offered_to LIKE ?").bind(JSON.stringify(from), JSON.stringify(to), `%${from}%`),
@@ -865,6 +1039,8 @@ async function api(req, env, url) {
       env.DB.prepare("DELETE FROM quals WHERE email=?").bind(email),
       env.DB.prepare("DELETE FROM photos WHERE email=?").bind(email),
       env.DB.prepare("DELETE FROM signatures WHERE email=?").bind(email),
+      env.DB.prepare("DELETE FROM training_status WHERE email=?").bind(email),
+      env.DB.prepare("DELETE FROM training_results WHERE email=?").bind(email),
       env.DB.prepare("DELETE FROM users WHERE email=?").bind(email),
     ]);
     await audit(env, me.email, "user_delete", email, { name: u.name, role: u.role });

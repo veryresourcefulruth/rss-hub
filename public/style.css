@@ -268,3 +268,10 @@ textarea.mono{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:.82r
 @media print{.install-bar{display:none}}
 /* When opened from the home screen, keep clear of the phone notch and home bar */
 @media (display-mode: standalone){body{padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom)}}
+
+/* Childcare 101 inside the Hub */
+.t-head{margin-bottom:18px;padding-bottom:16px}
+.subnav{display:flex;gap:8px;flex-wrap:wrap}
+.tab.sm{padding:6px 12px;font-size:.88rem}
+.t-one{display:block}
+@media print{.t-head,.rail{display:none}.wrap{display:block}}

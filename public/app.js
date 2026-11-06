@@ -38,9 +38,9 @@ async function download(path, fallbackName) {
 let me = null, view = null, cache = {};
 const isAdmin = () => me && (me.role === "owner" || me.role === "coordinator");
 const TABS = {
-  staff: [["shifts", "My shifts"], ["hours", "My hours"], ["checks", "My checks"]],
+  staff: [["shifts", "My shifts"], ["hours", "My hours"], ["checks", "My checks"], ["training", "Training"]],
   manager: [["shifts", "Our shifts"], ["staff", "Our staff"], ["request", "Request cover"], ["hours", "Sign off hours"]],
-  admin: [["today", "Today"], ["shifts", "Shifts"], ["staff", "Staff"], ["nurseries", "Nurseries"], ["billing", "Hours & billing"], ["settings", "Settings"]],
+  admin: [["today", "Today"], ["shifts", "Shifts"], ["staff", "Staff"], ["nurseries", "Nurseries"], ["billing", "Hours & billing"], ["training", "Training"], ["settings", "Settings"]],
 };
 const tabsFor = () => TABS[isAdmin() ? "admin" : me.role];
 
@@ -63,8 +63,8 @@ const LIST_VIEWS = ["shifts", "hours", "checks", "today", "staff", "nurseries"];
 const outstandingHtml = (list, link) => `<div class="callout outstanding" role="alert"><b>You cannot currently be booked into a shift, as you have outstanding requirements to complete:</b>
   <ul class="blk">${list.map(b => `<li>${esc(b.charAt(0).toUpperCase() + b.slice(1))}</li>`).join("")}</ul>
   <div class="note" style="color:inherit">Upload or update these in My checks. RSS checks each item, usually within 2 working days. Once everything is verified, shifts will open up for you here.</div>
-  <div class="row" style="margin-top:8px">${list.some(b => /terms of engagement/i.test(b)) ? `<button class="btn sm" id="toTerms">Read and sign the terms</button>` : ""}${link ? `<button class="btn ${list.some(b => /terms of engagement/i.test(b)) ? "ghost " : ""}sm" id="toChecks">Go to My checks</button>` : ""}</div></div>`;
-const wireOutstanding = () => { const t = $("#toTerms"); if (t) t.onclick = () => go("terms"); const c = $("#toChecks"); if (c) c.onclick = () => go("checks"); };
+  <div class="row" style="margin-top:8px">${list.some(b => /terms of engagement/i.test(b)) ? `<button class="btn sm" id="toTerms">Read and sign the terms</button>` : ""}${list.some(b => /childcare 101/i.test(b)) ? `<button class="btn sm" id="toTraining">Do Childcare 101</button>` : ""}${link ? `<button class="btn ${list.some(b => /terms of engagement/i.test(b)) ? "ghost " : ""}sm" id="toChecks">Go to My checks</button>` : ""}</div></div>`;
+const wireOutstanding = () => { const t = $("#toTerms"); if (t) t.onclick = () => go("terms"); const tr = $("#toTraining"); if (tr) tr.onclick = () => go("training"); const c = $("#toChecks"); if (c) c.onclick = () => go("checks"); };
 const declinedHtml = s => s.declined?.length ? `<div class="note">Declined by ${s.declined.map(d => esc(d.name) + (d.reason ? ` (“${esc(d.reason)}”)` : "")).join(", ")}</div>` : "";
 const expiringHtml = list => list?.length ? `<div class="callout"><b>Training and certificates to renew:</b><ul class="blk" style="color:inherit">${list.map(x => `<li>${esc(x.label)}: ${x.expired ? "<b>expired</b> " : "expires "}${fullDate(x.expires_on)}</li>`).join("")}</ul></div>` : "";
 const refreshIfIdle = () => { if (me && LIST_VIEWS.includes(view) && document.visibilityState === "visible" && !$("#drawer-root").innerHTML && !document.activeElement?.matches("input,textarea,select")) render(); };
@@ -346,6 +346,7 @@ async function agreementView() {
    STAFF
    ===================================================================== */
 const STAFF = {
+  training: () => trainingStaff(),
   async shifts() {
     const [open, mine] = await Promise.all([api("/api/open-shifts"), api(`/api/shifts?from=${me.today}`)]);
     const upcoming = mine.filter(s => s.status === "filled"), toConfirm = mine.filter(s => s.status === "pending");
@@ -401,13 +402,14 @@ const STAFF = {
     const t = me.training || {};
     $("#app").innerHTML = `<div class="panel"><p class="eyebrow">My checks</p>${photoBlock(me.email, me.name, me.has_photo, true)}<h2>${me.blockers.length ? "Not ready to book yet" : "Ready to work"}</h2>
     ${me.blockers.length ? outstandingHtml(me.blockers, false) : `<p class="note">All required checks and training are verified. Keep your certificates in date so you can keep picking up shifts.</p>`}
-    <div class="check-row"><div><b>Childcare 101 training</b><div class="note">${t.found ? `${t.passed} of ${t.total} modules passed${t.declaredAt ? ", declaration signed" : ""}` : "Not started, or your name on the training doesn't match. Use the same full name on both."}</div></div>
-      ${t.complete ? pill(["Complete", "ok"]) : `<a class="btn sm" href="https://rss-training.ruth-d53.workers.dev" target="_blank" rel="noopener">Open training</a>`}</div>
+    <div class="check-row"><div><b>Childcare 101 training</b><div class="note">${t.passed ? `${t.passed} of ${t.total} modules passed${t.declaredAt ? ", declaration signed" : ""}` : "Not started yet. It takes about 3 hours, and you can stop and carry on any time."}</div></div>
+      ${t.complete ? `<button class="btn ghost sm" id="toTraining2">View certificate</button>` : `<button class="btn sm" id="toTraining2">${t.passed ? "Carry on" : "Start training"}</button>`}</div>
     ${expiringHtml(me.expiring)}
     ${checkRows(me.checks, k => k === "terms" ? `<button class="btn ${me.checks.terms?.status === "verified" ? "ghost " : ""}sm" id="toTerms2">${me.checks.terms?.status === "verified" ? "View signed terms" : "Read and sign"}</button>` : `<button class="btn ghost sm" data-ck="${k}">${me.checks[k] ? "View / update" : "Add"}</button>`)}
     ${qualRows(me.quals, true)}</div>`;
     wirePhoto($("#app"), me.email, () => render());
     wireOutstanding(); $("#toTerms2").onclick = () => go("terms");
+    $("#toTraining2").onclick = () => { T.sub = t.complete ? "cert" : "learn"; go("training"); };
     $$("[data-qual]").forEach(b => b.onclick = () => qualDrawer(me.email, me.quals.find(q => q.id == b.dataset.qual), false, () => { closeDrawer(); render(); }));
     $$("[data-ck]").forEach(b => b.onclick = () => openDrawer(checkForm(me.email, b.dataset.ck, me.checks[b.dataset.ck], false), root => wireCheckForm(root, me.email, b.dataset.ck, false, () => { closeDrawer(); render(); })));
   },
@@ -587,6 +589,7 @@ async function signOffList(path) {
    RSS OFFICE
    ===================================================================== */
 const ADMIN = {
+  training: () => trainingAdmin(),
   async today() {
     const d = await api("/api/dashboard");
     cache.counts = { shifts: d.requested + d.open + d.pending || 0, billing: d.awaiting || 0, staff: d.pendingChecks || 0 }; renderTabs(cache.counts);
@@ -831,7 +834,7 @@ async function staffDrawer(email) {
   setDrawer(`<p class="eyebrow">Staff file</p>${photoBlock(u.email, u.name, u.has_photo, true)}<h2>${esc(u.name)}</h2>
   <p class="note">${esc(u.email)}${u.phone ? " · " + esc(u.phone) : ""} · Pay ${u.pay_rate != null ? gbp(u.pay_rate) + "/h" : "not set"} <button class="link-btn" id="sd_edit">Edit details</button> <button class="link-btn" id="sd_prof">Agency profile</button></p>
   ${u.blockers.length ? `<div class="callout"><b>Can't be booked:</b><ul class="blk">${u.blockers.map(b => `<li>${esc(b)}</li>`).join("")}</ul></div>` : `<div class="callout exp"><b>Ready to book.</b></div>`}
-  <div class="check-row"><div><b>Childcare 101 training</b><div class="note">${t.found ? `${t.passed} of ${t.total} modules passed${t.declaredAt ? ", declaration signed " + fullDate(t.declaredAt) : ""}` : `No training record found under "${esc(u.training_name || u.name)}". If they used a different name, set it under Edit details.`}</div></div>${t.complete ? pill(["Complete", "ok"]) : pill(["Not complete", "bad"])}</div>
+  <div class="check-row"><div><b>Childcare 101 training</b><div class="note">${t.found ? `${t.passed} of ${t.total} modules passed${t.declaredAt ? ", declaration signed " + fullDate(t.declaredAt) : ""}` : `Not started yet.`}</div></div>${t.complete ? pill(["Complete", "ok"]) : pill(["Not complete", "bad"])}</div>
   ${expiringHtml(u.expiring)}
   ${checkRows(u.checks, k => `<button class="btn ${u.checks[k]?.status === "pending" ? "" : "ghost"} sm" data-ck="${k}">${u.checks[k]?.status === "pending" ? "Check now" : "Open"}</button>`)}
   <div class="row"><button class="btn ghost sm" id="sd_terms">Signed terms &amp; Key Information Document</button></div>
@@ -857,7 +860,7 @@ function userDrawer(u) {
     <label class="fld" for="u_role">Role<select id="u_role">${roleOpts.map(([v, l]) => `<option value="${v}" ${u.role === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
     <label class="fld" for="u_client" data-for="manager">Nursery<select id="u_client">${clients.map(c => `<option value="${c.id}" ${u.client_id === c.id ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select></label>
     <label class="fld" for="u_pay" data-for="staff">Pay rate (£ per hour)<input type="number" step="0.01" min="0" id="u_pay" value="${rate(u.pay_rate)}"></label>
-    <label class="fld" for="u_tn" data-for="staff">Name used on Childcare 101 (if different)<input type="text" id="u_tn" value="${esc(u.training_name)}"></label>
+    <label class="fld" for="u_tn" data-for="staff">Name used in the old Childcare 101 app (only if different, to carry over their results)<input type="text" id="u_tn" value="${esc(u.training_name)}"></label>
   </div>
   <label class="fld" for="u_notes">Notes<textarea id="u_notes" class="plain" style="max-width:none">${esc(u.notes)}</textarea></label>
   <label class="opt" for="u_active"><input type="checkbox" id="u_active" ${u.active !== 0 ? "checked" : ""}><span>Active (can sign in${u.role === "staff" ? " and be booked" : ""})</span></label>

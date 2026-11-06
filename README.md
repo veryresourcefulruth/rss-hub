@@ -37,3 +37,12 @@ in the hub (My checks → Read and sign). Signing records the typed name, time, 
 and marks "RSS terms of engagement signed" as verified. Every published version is kept (`agreement_versions`), so a
 signed copy always shows the text that was signed. The owner publishes new versions from Settings → Terms of engagement,
 optionally requiring everyone to sign again before their next booking. `content/*.md` holds version 1.
+
+## Childcare 101
+
+The induction course lives in the Hub under **Training** (moved from the separate rss-training app in Nov 2026).
+Staff take it signed in as themselves, so results are tied to their email. Quizzes are marked on the server.
+The RSS office sees the tracker, previews and edits modules, and changes course settings from the Training tab.
+On first use the course content is copied from the old app's database (`TRAINING` binding) into Hub settings, and each
+person's old results are carried over by matching their name (or "Name used in the old Childcare 101 app") once.
+Old records that didn't match are listed on the tracker so RSS can link them by hand.

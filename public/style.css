@@ -256,3 +256,15 @@ header.top{flex-wrap:wrap}
 .sig-box{border:1.5px solid var(--ink);border-radius:8px;padding:12px 14px;margin:0 0 16px;line-height:1.5}
 textarea.mono{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:.82rem}
 @media print{.doc-fold .agreement-doc{max-height:none;overflow:visible}.page-break{break-before:page;border:0}.agreement-doc{max-width:none}}
+
+/* "Get the app" bar (install.js) */
+.install-bar{position:fixed;left:12px;right:12px;bottom:calc(12px + env(safe-area-inset-bottom));z-index:60;display:flex;align-items:center;gap:12px;
+  background:var(--surface);color:var(--ink);border:1px solid var(--line);border-radius:14px;padding:10px 12px;box-shadow:0 8px 30px rgba(0,0,0,.18);max-width:520px;margin:0 auto}
+.install-bar img{border-radius:10px;flex:none}
+.install-bar .ib-text{flex:1;line-height:1.35;font-size:.92rem}
+.install-bar .ib-text b:first-child{display:block}
+.install-bar .ib-go{font:inherit;font-weight:700;border:0;border-radius:10px;padding:8px 14px;background:var(--accent);color:#fff;cursor:pointer}
+.install-bar .ib-x{font:inherit;border:0;background:none;color:var(--muted);padding:6px;cursor:pointer;font-size:1rem}
+@media print{.install-bar{display:none}}
+/* When opened from the home screen, keep clear of the phone notch and home bar */
+@media (display-mode: standalone){body{padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom)}}

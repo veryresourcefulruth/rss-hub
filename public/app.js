@@ -119,7 +119,10 @@ async function act(btn, fn, msgEl) {
   try { await fn(); } catch (e) { if (msgEl) msgEl.textContent = e.message; else toast(e.message); btn.disabled = false; return false; }
   btn.disabled = false; return true;
 }
-const checkStatusPill = (c, def, today) => !c ? pill(["Missing", def.required ? "bad" : ""]) :
+// Terms are completed only by signing in the hub, so show when and which version.
+const termsPill = c => c?.status === "verified" && c.verified_by === "Signed in RSS Hub" ? pill([`Signed ${fullDate(c.verified_at)}${c.ref ? " · " + c.ref : ""}`, "ok"])
+  : c?.status === "verified" ? pill(["Ticked by hand, no signed copy", "warn"]) : pill(["Not signed yet", "bad"]);
+const checkStatusPill = (c, def, today) => def === me.checkTypes.terms ? termsPill(c) : !c ? pill(["Missing", def.required ? "bad" : ""]) :
   c.status === "verified" ? (c.expires_on && c.expires_on < today ? pill(["Expired " + fullDate(c.expires_on), "bad"]) : pill(["Verified" + (c.expires_on ? " · to " + fullDate(c.expires_on) : ""), "ok"])) :
   c.status === "rejected" ? pill(["Rejected", "bad"]) : pill([(c.docs ? "Uploaded, " : "") + "awaiting RSS check", "warn"]);
 
@@ -908,11 +911,11 @@ async function staffDrawer(email) {
   ${u.blockers.length ? `<div class="callout"><b>Can't be booked:</b><ul class="blk">${u.blockers.map(b => `<li>${esc(b)}</li>`).join("")}</ul></div>` : `<div class="callout exp"><b>Ready to book.</b></div>`}
   <div class="check-row"><div><b>Childcare 101 training</b><div class="note">${t.found ? `${t.passed} of ${t.total} modules passed${t.declaredAt ? ", declaration signed " + fullDate(t.declaredAt) : ""}` : `Not started yet.`}</div></div>${t.complete ? pill(["Complete", "ok"]) : pill(["Not complete", "bad"])}</div>
   ${expiringHtml(u.expiring)}
-  ${checkRows(u.checks, k => `<button class="btn ${u.checks[k]?.status === "pending" ? "" : "ghost"} sm" data-ck="${k}">${u.checks[k]?.status === "pending" ? "Check now" : "Open"}</button>`)}
-  <div class="row"><button class="btn ghost sm" id="sd_terms">Signed terms &amp; Key Information Document</button></div>
+  ${checkRows(u.checks, k => k === "terms" ? (u.checks.terms?.verified_by === "Signed in RSS Hub" ? `<button class="btn ghost sm" id="sd_terms">View signed copy</button>` : `<span class="note">They sign under My checks</span>`)
+    : `<button class="btn ${u.checks[k]?.status === "pending" ? "" : "ghost"} sm" data-ck="${k}">${u.checks[k]?.status === "pending" ? "Check now" : "Open"}</button>`)}
   ${qualRows(u.quals, true)}`, root => {
     root.querySelector("#sd_edit").onclick = () => userDrawer(u);
-    root.querySelector("#sd_terms").onclick = () => openSignedRecord(email, () => staffDrawer(email));
+    if (root.querySelector("#sd_terms")) root.querySelector("#sd_terms").onclick = () => openSignedRecord(email, () => staffDrawer(email));
     root.querySelector("#sd_prof").onclick = async () => { const a = await api(`/api/staff/${encodeURIComponent(email)}/profile`); setDrawer(`<button class="link-btn no-print" id="back">← Back to ${esc(u.name)}</button>` + agencyProfileHtml(a), r => r.querySelector("#back").onclick = () => staffDrawer(email)); };
     wirePhoto(root, email, () => { render(); staffDrawer(email); });
     root.querySelectorAll("[data-qual]").forEach(b => b.onclick = () => qualDrawer(email, u.quals.find(q => q.id == b.dataset.qual), true, () => { render(); staffDrawer(email); }));

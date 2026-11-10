@@ -28,12 +28,20 @@ for (const [e, n] of [[ADA, "Ada Obi"], [BEN, "Ben Lee"]]) { [s, r] = await call
 [s, r] = await call(MGR, `/api/staff/${ADA}/checks/dbs/documents`); ok(s === 403, "manager can't see documents", r);
 // owner verifies everything for Ada, PFA needed for this shift
 const verify = async (who, type, extra = {}) => call(OWNER, `/api/staff/${who}/checks/${type}`, "PUT", { ref: "x", issued_on: "2026-01-01", status: "verified", ...(type === "dbs" ? { dbs_type: "Enhanced with barred list (Child Workforce)", update_service: true, update_service_no: "C123" } : {}), ...extra });
-for (const t of ["dbs", "rtw", "id", "ref1", "ref2", "terms", "safeguarding", "food", "prevent", "hs", "safesleep", "babies"]) { [s, r] = await verify(ADA, t, t === "rtw" ? { weekly_hours_limit: 20, expires_on: d(300) } : ["safeguarding", "food", "prevent", "hs", "safesleep", "babies"].includes(t) ? { expires_on: d(400) } : {}); ok(s === 200 && r[t].status === "verified", "verify " + t, r[t] || r); }
+// Terms are only completed by the worker signing in the hub; RSS can't tick them by hand.
+const signTerms = async (who, name) => { const v = (await call(who, "/api/agreement"))[1].version; await call(who, "/api/agreement/kid-ack", "POST", { version: v }); return call(who, "/api/agreement/sign", "POST", { version: v, agree: true, typed_name: name }); };
+[s, r] = await verify(ADA, "terms"); ok(s === 400 && /signs them/.test(r.error), "RSS can't tick the terms check by hand", r);
+[s, r] = await call(ADA, `/api/staff/${ADA}/checks/terms/documents`, "POST", new Uint8Array([0x25, 0x50, 0x44, 0x46]), { "content-type": "application/pdf", "x-filename": "terms.pdf" }); ok(s === 400, "terms can't be uploaded instead of signed", r);
+[s, r] = await call(OWNER, `/api/agreement/signature/${ADA}`); ok(s === 404, "no signed copy before signing", r);
+[s, r] = await signTerms(ADA, "Ada Obi"); ok(s === 200, "Ada signs the terms", r);
+[s, r] = await call(OWNER, `/api/agreement/signature/${ADA}`); ok(s === 200 && r.signed_at && r.typed_name === "Ada Obi", "RSS can open Ada's signed copy", r);
+for (const t of ["dbs", "rtw", "id", "ref1", "ref2", "safeguarding", "food", "prevent", "hs", "safesleep", "babies"]) { [s, r] = await verify(ADA, t, t === "rtw" ? { weekly_hours_limit: 20, expires_on: d(300) } : ["safeguarding", "food", "prevent", "hs", "safesleep", "babies"].includes(t) ? { expires_on: d(400) } : {}); ok(s === 200 && r[t].status === "verified", "verify " + t, r[t] || r); }
 [s, r] = await call(OWNER, `/api/shifts/${sid}/assign`, "POST", { email: ADA }); ok(s === 409 && r.blockers.some(b => /first aid/.test(b)), "PFA requirement enforced", r);
 [s, r] = await verify(ADA, "pfa", { issued_on: "" }); ok(s === 400, "training needs an issue date before verifying", r);
 [s, r] = await verify(ADA, "pfa", { issued_on: d(2 - 365) }); ok(s === 200 && r.pfa.expires_on >= d(2), "PFA verified, expiry set to 1 year after issue", r.pfa);
 // Ben: training incomplete
-for (const t of ["dbs", "rtw", "id", "ref1", "ref2", "terms", "safeguarding", "food", "prevent", "hs", "safesleep", "babies"]) await verify(BEN, t, ["safeguarding", "food", "prevent", "hs", "safesleep", "babies"].includes(t) ? { expires_on: d(400) } : {});
+await signTerms(BEN, "Ben Lee");
+for (const t of ["dbs", "rtw", "id", "ref1", "ref2", "safeguarding", "food", "prevent", "hs", "safesleep", "babies"]) await verify(BEN, t, ["safeguarding", "food", "prevent", "hs", "safesleep", "babies"].includes(t) ? { expires_on: d(400) } : {});
 [s, r] = await call(OWNER, `/api/shifts/${sid}`); const cand = Object.fromEntries(r.candidates.map(c => [c.email, c.blockers]));
 ok(cand[ADA].length === 0, "Ada eligible", cand[ADA]); ok(cand[BEN].some(b => /training/.test(b)), "Ben blocked by training", cand[BEN]);
 // offer to all, Ben can't accept, Ada accepts

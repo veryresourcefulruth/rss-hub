@@ -338,7 +338,8 @@ export function blockers(user, checks, training, shift, weekMins = 0) {
   for (const [type, def] of Object.entries(CHECKS)) {
     if (!def.required) continue;
     const c = checks[type];
-    if (!c || c.status !== "verified") why.push(`${def.label} not verified`);
+    if (type === "terms" && (!c || c.status !== "verified")) why.push("RSS terms of engagement not signed in the RSS Hub yet");
+    else if (!c || c.status !== "verified") why.push(`${def.label} not verified`);
     else if (c.expires_on && c.expires_on < on) why.push(`${def.label} expired ${c.expires_on}`);
   }
   if (checks.dbs?.status === "verified" && checks.dbs.detail?.barred === false) why.push(`DBS is ${checks.dbs.detail?.dbs_type || "not"} an enhanced check with the children's barred list`);
@@ -814,6 +815,8 @@ async function api(req, env, url) {
     const email = decodeURIComponent(m[1]).toLowerCase(), type = m[2];
     need(isAdmin || (role === "staff" && email === me.email));
     if (!CHECKS[type]) bad("Unknown check.");
+    // The terms check is only ever completed by the person signing in the hub, so there is always a signed copy to show.
+    if (type === "terms") bad("The terms are ticked off automatically when the staff member signs them in the RSS Hub. They can't be ticked by hand.");
     const u = await env.DB.prepare("SELECT email FROM users WHERE email=? AND role='staff'").bind(email).first();
     if (!u) return fail(404, "No such staff member.");
     const b = await body(), def = CHECKS[type];
@@ -866,6 +869,7 @@ async function api(req, env, url) {
     need(isAdmin || (role === "staff" && email === me.email));
     let c = await env.DB.prepare("SELECT * FROM checks WHERE email=? AND type=?").bind(email, type).first();
     if (!CHECKS[type]) bad("Unknown check.");
+    if (type === "terms") bad("The terms are signed in the RSS Hub, not uploaded.");
     if (!c) {
       if (!(await env.DB.prepare("SELECT 1 FROM users WHERE email=? AND role='staff'").bind(email).first())) return fail(404, "No such staff member.");
       await env.DB.prepare("INSERT INTO checks(email,type,status,created_by,created_at) VALUES (?,?,'pending',?,?)").bind(email, type, me.email, nowIso()).run();

@@ -38,7 +38,7 @@ async function download(path, fallbackName) {
 let me = null, view = null, cache = {};
 const isAdmin = () => me && (me.role === "owner" || me.role === "coordinator");
 const TABS = {
-  staff: [["shifts", "My shifts"], ["hours", "My hours"], ["checks", "My checks"], ["training", "Training"]],
+  staff: [["shifts", "My shifts"], ["availability", "My availability"], ["hours", "My hours"], ["checks", "My checks"], ["training", "Training"]],
   manager: [["shifts", "Our shifts"], ["station", "Sign-in station"], ["staff", "Our staff"], ["request", "Request cover"], ["hours", "Sign off hours"]],
   admin: [["today", "Today"], ["shifts", "Shifts"], ["staff", "Staff"], ["nurseries", "Nurseries"], ["billing", "Hours & billing"], ["training", "Training"], ["settings", "Settings"]],
 };
@@ -65,6 +65,14 @@ const outstandingHtml = (list, link) => `<div class="callout outstanding" role="
   <div class="note" style="color:inherit">Upload or update these in My checks. RSS checks each item, usually within 2 working days. Once everything is verified, shifts will open up for you here.</div>
   <div class="row" style="margin-top:8px">${list.some(b => /terms of engagement/i.test(b)) ? `<button class="btn sm" id="toTerms">Read and sign the terms</button>` : ""}${list.some(b => /childcare 101/i.test(b)) ? `<button class="btn sm" id="toTraining">Do Childcare 101</button>` : ""}${link ? `<button class="btn ${list.some(b => /terms of engagement/i.test(b)) ? "ghost " : ""}sm" id="toChecks">Go to My checks</button>` : ""}</div></div>`;
 const wireOutstanding = () => { const t = $("#toTerms"); if (t) t.onclick = () => go("terms"); const tr = $("#toTraining"); if (tr) tr.onclick = () => go("training"); const c = $("#toChecks"); if (c) c.onclick = () => go("checks"); };
+// Weekly availability: reminder for staff, and labels for RSS.
+const weekLabel = w => `week beginning ${new Date(w + "T12:00:00Z").toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", timeZone: "UTC" })}`;
+const deadlineLabel = d => `${new Date(d + "T12:00:00Z").toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", timeZone: "UTC" })} at 23:59`;
+const availDueHtml = due => !due || due.submitted ? "" : `<div class="callout ${due.overdue ? "outstanding" : ""}" role="${due.overdue ? "alert" : "status"}"><b>${due.overdue ? "Your availability for next week is overdue." : "Send your availability for next week."}</b>
+  RSS needs to know when you can work in the ${weekLabel(due.week_start)}${due.overdue ? "" : `, by ${deadlineLabel(due.deadline_date)}`}. We offer shifts to people who have told us they're available first.
+  <div class="row" style="margin-top:8px"><button class="btn sm" id="toAvail">Give my availability</button></div></div>`;
+const wireAvailDue = () => { const b = $("#toAvail"); if (b) b.onclick = () => go("availability"); };
+const FIT = { full: ["Available", "ok"], part: ["Partly available", "warn"], no: ["Said not available", "bad"], unknown: ["No availability given", ""] };
 const declinedHtml = s => s.declined?.length ? `<div class="note">Declined by ${s.declined.map(d => esc(d.name) + (d.reason ? ` (“${esc(d.reason)}”)` : "")).join(", ")}</div>` : "";
 const expiringHtml = list => list?.length ? `<div class="callout"><b>Training and certificates to renew:</b><ul class="blk" style="color:inherit">${list.map(x => `<li>${esc(x.label)}: ${x.expired ? "<b>expired</b> " : "expires "}${fullDate(x.expires_on)}</li>`).join("")}</ul></div>` : "";
 const refreshIfIdle = () => { if (me && LIST_VIEWS.includes(view) && document.visibilityState === "visible" && !$("#drawer-root").innerHTML && !document.activeElement?.matches("input,textarea,select")) render(); };
@@ -351,6 +359,7 @@ const STAFF = {
     const [open, mine] = await Promise.all([api("/api/open-shifts"), api(`/api/shifts?from=${me.today}`)]);
     const upcoming = mine.filter(s => s.status === "filled"), toConfirm = mine.filter(s => s.status === "pending");
     $("#app").innerHTML = `
+    ${availDueHtml(me.availability_due)}
     ${expiringHtml(me.expiring)}
     ${toConfirm.length ? `<div class="section-h"><h2>Please confirm</h2></div><p class="note" style="margin-top:-6px">RSS has asked you to work these shifts. Accept or decline so the nursery knows.</p>
     <div class="cards">${toConfirm.map(s => `<div class="card attn"><div class="section-h" style="margin:0"><h4>${esc(s.client_name)}</h4>${shiftWhen(s)}</div>
@@ -368,7 +377,7 @@ const STAFF = {
     <div class="cards">${upcoming.length ? upcoming.map(s => `<div class="card ok"><div class="section-h" style="margin:0"><h4>${esc(s.client_name)}</h4>${shiftWhen(s)}</div>
       <div class="meta">${clockPill(s)}${shiftReqs(s)} · ${hrs(s.mins)} · Pay ${gbp(s.pay_rate)}/h</div>${s.notes ? `<div class="note">${esc(s.notes)}</div>` : ""}${phoneClockHtml(s)}</div>`).join("") : `<p class="empty">Nothing booked yet.</p>`}</div>
     <p class="note" style="margin-top:20px">Can't make a booked shift? Call RSS straight away. Don't contact the nursery's parent line or just not turn up.</p>`;
-    wireOutstanding(); wirePhoneClock(); wirePinRow();
+    wireOutstanding(); wirePhoneClock(); wirePinRow(); wireAvailDue();
     $$("[data-confirm]").forEach(b => b.onclick = async () => {
       if (await act(b, () => api(`/api/shifts/${b.dataset.confirm}/accept`, { method: "POST", body: {} }), $("#ce" + b.dataset.confirm))) { toast("Confirmed. The nursery can now see you're coming."); render(); }
     });
@@ -417,7 +426,41 @@ const STAFF = {
     $$("[data-ck]").forEach(b => b.onclick = () => openDrawer(checkForm(me.email, b.dataset.ck, me.checks[b.dataset.ck], false), root => wireCheckForm(root, me.email, b.dataset.ck, false, () => { closeDrawer(); render(); })));
   },
   terms: agreementView,
+  availability: () => availabilityStaff(),
 };
+
+async function availabilityStaff() {
+  me = await api("/api/me");
+  const due = me.availability_due;
+  const week = cache.availWeek || due.week_start;
+  const a = await api("/api/availability?week=" + week);
+  const thisMonday = (() => { const d = new Date(me.today + "T12:00:00Z"); d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7)); return d.toISOString().slice(0, 10); })();
+  const shift = n => { const d = new Date(week + "T12:00:00Z"); d.setUTCDate(d.getUTCDate() + 7 * n); return d.toISOString().slice(0, 10); };
+  const canBack = week > thisMonday, canFwd = shift(1) <= (() => { const d = new Date(thisMonday + "T12:00:00Z"); d.setUTCDate(d.getUTCDate() + 28); return d.toISOString().slice(0, 10); })();
+  const opts = Object.entries(a.slots);
+  $("#app").innerHTML = `<div class="panel" style="max-width:760px"><p class="eyebrow">My availability</p>
+    <h2>${a.is_due_week ? "Next week" : week === thisMonday ? "This week" : "Week ahead"}: ${weekLabel(week).replace("week beginning ", "w/c ")}</h2>
+    <p class="note">Tell RSS when you can work each day. ${a.is_due_week ? `Due by <b>${deadlineLabel(a.deadline_date)}</b>.` : ""} You can change it later if your plans change, as long as the day hasn't passed.</p>
+    ${a.submitted_at ? `<p>${pill(["Sent", "ok"])} <span class="note">Last updated ${fullDateTime(a.submitted_at)}${a.late ? " (sent after the deadline)" : ""}</span></p>` : `<p>${pill([a.is_due_week && due.overdue ? "Overdue" : "Not sent yet", a.is_due_week && due.overdue ? "bad" : "warn"])}</p>`}
+    <div class="row" style="margin:8px 0 16px"><button class="btn ghost sm" id="av_prev" ${canBack ? "" : "disabled"}>← Earlier week</button><button class="btn ghost sm" id="av_next" ${canFwd ? "" : "disabled"}>Later week →</button></div>
+    <div class="row" style="margin-bottom:12px"><span class="note">Quick fill:</span><button class="link-btn" data-fill="all">Available every day</button><button class="link-btn" data-fill="none">Not available all week</button></div>
+    <div class="cards">${a.days.map((d, i) => `<div class="check-row" style="align-items:center;flex-wrap:wrap;gap:8px"><div style="min-width:130px"><b>${dayName(d.date)}</b>${d.past ? `<div class="note">Day has passed</div>` : ""}</div>
+      <div class="row" style="gap:8px;flex-wrap:wrap">
+        <select id="av_s${i}" aria-label="Availability for ${dayName(d.date)}" ${d.past ? "disabled" : ""}><option value="">Choose…</option>${opts.map(([k, l]) => `<option value="${k}" ${d.slot === k ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>
+        <span id="av_t${i}" ${d.slot === "times" ? "" : "hidden"}><input type="time" id="av_a${i}" aria-label="From" value="${esc(d.start || "08:00")}" ${d.past ? "disabled" : ""}> to <input type="time" id="av_b${i}" aria-label="Until" value="${esc(d.finish || "18:00")}" ${d.past ? "disabled" : ""}></span>
+      </div></div>`).join("")}</div>
+    <p class="note">Mornings means roughly 07:00–13:00 and afternoons 12:00–19:00. Choose "Between set times" for anything else.</p>
+    <p class="err" id="av_err"></p><div class="row"><button class="btn" id="av_go" ${a.days.every(d => d.past) ? "disabled" : ""}>${a.submitted_at ? "Update my availability" : "Send my availability"}</button></div></div>`;
+  a.days.forEach((d, i) => { const sel = $("#av_s" + i); sel.onchange = () => { $("#av_t" + i).hidden = sel.value !== "times"; }; });
+  $$("[data-fill]").forEach(b => b.onclick = () => a.days.forEach((d, i) => { if (!d.past) { $("#av_s" + i).value = b.dataset.fill; $("#av_t" + i).hidden = true; } }));
+  $("#av_prev").onclick = () => { cache.availWeek = shift(-1); render(); };
+  $("#av_next").onclick = () => { cache.availWeek = shift(1); render(); };
+  $("#av_go").onclick = async () => {
+    const days = a.days.filter(d => !d.past).map(d => { const i = a.days.indexOf(d); return { date: d.date, slot: $("#av_s" + i).value, start: $("#av_a" + i).value, finish: $("#av_b" + i).value }; });
+    let res;
+    if (await act($("#av_go"), async () => { res = await api("/api/availability", { method: "PUT", body: { week_start: week, days } }); }, $("#av_err"))) { toast(res.late ? "Sent, thank you. It was after the deadline, so please send it by Tuesday next time." : "Thank you. RSS can now see when you're available."); render(); }
+  };
+}
 function shiftBack(n) { const d = new Date(me.today + "T12:00:00Z"); d.setUTCDate(d.getUTCDate() - n); return d.toISOString().slice(0, 10); }
 function timesheetDrawer(s) {
   openDrawer(`<p class="eyebrow">Submit hours</p><h2>${esc(s.client_name)}</h2><p>${shiftWhen(s)} <span class="note">(booked ${s.start}–${s.finish}, ${s.break_min} min break)</span></p>
@@ -607,12 +650,16 @@ const ADMIN = {
     <div class="panel" style="margin-top:24px"><div class="section-h" style="margin:0 0 8px"><h3 style="margin:0">Today's arrivals</h3><button class="btn ghost sm" id="toStation">Open a sign-in station</button></div>
       ${d.arrivals.length ? `<div class="tbl"><table><thead><tr><th>Worker</th><th>Nursery</th><th>Booked</th><th>Arrived</th><th>Break</th><th>Left</th></tr></thead><tbody>${d.arrivals.map(a => `<tr${a.late ? ` class="late"` : ""}><td><b>${esc(a.worker_name)}</b>${a.late && a.worker_phone ? ` <a href="tel:${esc(a.worker_phone)}">Call</a>` : ""}</td><td>${esc(a.client_name)}</td><td class="n">${a.start}–${a.finish}</td>
         <td class="n">${a.clock_in_at ? ukClock(a.clock_in_at) + (a.clock_in_by === "phone" ? " 📱" : a.clock_in_by === "manager" ? " (manager)" : "") : a.late ? `<b style="color:var(--bad)">Not arrived</b>` : "–"}</td><td class="n">${a.breaks.length ? breakText(a) + (onBreak(a) ? " (on break)" : "") : "–"}</td><td class="n">${a.clock_out_at ? ukClock(a.clock_out_at) : "–"}</td></tr>`).join("")}</tbody></table></div>` : `<p class="empty">Nobody is booked today.</p>`}</div>
+    ${(() => { const av = d.availability; return `<div class="panel" style="margin-top:24px"><div class="section-h" style="margin:0 0 8px"><h3 style="margin:0">Availability for the ${weekLabel(av.week_start)}</h3><button class="btn ghost sm" id="toAvailTeam">See the week</button></div>
+      <p class="note" style="margin-top:0">${av.submitted} of ${av.ready} staff ready to book have sent it. Due ${deadlineLabel(av.deadline_date)}${av.overdue ? " (deadline passed)" : ""}.</p>
+      ${av.missing.length ? `<div class="note"><b style="color:${av.overdue ? "var(--bad)" : "inherit"}">Not sent yet:</b> ${av.missing.map(m => esc(m.name) + (m.phone ? ` <a href="tel:${esc(m.phone)}">Call</a>` : "")).join(", ")}</div>` : `<p class="empty">Everyone has sent their availability.</p>`}</div>`; })()}
     <div class="grid2" style="margin-top:24px">
       <div class="panel"><h3 style="margin-top:0">Not ready to book</h3>${d.notReady.length ? d.notReady.map(u => `<div class="check-row"><div><b>${esc(u.name)}</b><ul class="blk">${u.blockers.map(b => `<li>${esc(b)}</li>`).join("")}</ul></div><button class="btn ghost sm" data-staff="${esc(u.email)}">Open</button></div>`).join("") : `<p class="empty">Everyone is ready.</p>`}</div>
       <div class="panel"><h3 style="margin-top:0">Training &amp; certificates expired or due in 30 days</h3>${d.expiring.length ? d.expiring.map(x => `<div class="check-row"><div><b>${esc(x.name)}</b><div class="note">${esc(x.label)} · ${x.expired ? "<b style='color:var(--bad)'>expired</b> " : ""}${fullDate(x.expires_on)}</div></div><button class="btn ghost sm" data-staff="${esc(x.email)}">Open</button></div>`).join("") : `<p class="empty">Nothing expiring soon.</p>`}</div>
     </div>`;
     $$("[data-go]").forEach(b => b.onclick = () => go(b.dataset.go));
     $("#toStation").onclick = () => go("station");
+    $("#toAvailTeam").onclick = () => availabilityTeamDrawer(d.availability.week_start);
     $$("[data-staff]").forEach(b => b.onclick = () => staffDrawer(b.dataset.staff));
   },
 
@@ -800,7 +847,7 @@ async function shiftDrawer(id) {
      ${s.ts_status === "submitted" || s.ts_status === "queried" ? `<button class="btn sm" id="sd_appr">Approve hours on the nursery's behalf</button>` : ""}
      ${s.ts_status === "none" ? `<button class="btn ghost sm" id="sd_un">Unassign</button>` : ""}</div><p class="err" id="sd_err1"></p></div>` : ""}
   ${unfilled ? `<h3>Ready to work this shift (${ready.length})</h3>
-    ${ready.length ? `<div class="cards">${ready.map(c => `<div class="check-row"><label class="opt" style="margin:0;border:0;padding:0" for="cand_${c.email}"><input type="checkbox" class="cand" id="cand_${c.email}" value="${esc(c.email)}"><span><b>${esc(c.name)}</b>${c.phone ? ` <span class="note">${esc(c.phone)}</span>` : ""}</span></label>
+    ${ready.length ? `<div class="cards">${ready.map(c => `<div class="check-row"><label class="opt" style="margin:0;border:0;padding:0" for="cand_${c.email}"><input type="checkbox" class="cand" id="cand_${c.email}" value="${esc(c.email)}"><span><b>${esc(c.name)}</b>${c.phone ? ` <span class="note">${esc(c.phone)}</span>` : ""} ${pill(FIT[c.avail?.fit || "unknown"])}${c.avail && c.avail.fit !== "unknown" ? ` <span class="note">${esc(c.avail.label)}</span>` : ""}</span></label>
       <button class="btn sm" data-assign="${esc(c.email)}">Ask to work</button></div>`).join("")}</div>
       <p class="note">"Ask to work" sends it to that person to accept or decline. "Offer" lets the first eligible person to accept take it.</p>
       <div class="row"><button class="btn ghost" id="sd_pub">${s.status === "open" ? "Re-offer" : "Offer"} to ticked staff</button><button class="btn ghost" id="sd_puball">Offer to all ${ready.length} ready staff</button></div>`
@@ -832,6 +879,21 @@ async function shiftDrawer(id) {
       catch (e) { g("sd_save").disabled = false; g("sd_err3").textContent = e.message + (e.status === 409 ? " Unassign them first, or change it back." : ""); }
     };
     if (g("sd_cancel")) g("sd_cancel").onclick = () => cancelShift(id, g("sd_cancel"));
+  });
+}
+
+async function availabilityTeamDrawer(week) {
+  openDrawer(`<p class="loading">Loading…</p>`);
+  const t = await api("/api/availability/team?week=" + week);
+  const shiftW = n => { const d = new Date(t.week_start + "T12:00:00Z"); d.setUTCDate(d.getUTCDate() + 7 * n); return d.toISOString().slice(0, 10); };
+  const cell = a => !a ? `<span class="note">–</span>` : a.slot === "none" ? `<span style="color:var(--bad)">No</span>` : a.slot === "all" ? `<b style="color:var(--ok)">All day</b>` : a.slot === "am" ? "AM" : a.slot === "pm" ? "PM" : esc(a.label);
+  setDrawer(`<p class="eyebrow">Staff availability</p><h2>${weekLabel(t.week_start).replace("week beginning ", "W/c ")}</h2>
+    <p class="note">Due ${deadlineLabel(t.deadline_date)}. "–" means nothing given for that day. Staff not ready to book are shown faded.</p>
+    <div class="row" style="margin-bottom:10px"><button class="btn ghost sm" id="at_prev">← Earlier week</button><button class="btn ghost sm" id="at_next">Later week →</button></div>
+    <div class="tbl"><table><thead><tr><th>Staff</th>${t.days.map(d => `<th>${dayName(d).split(" ").slice(0, 2).join(" ")}</th>`).join("")}<th>Sent</th></tr></thead><tbody>
+    ${t.staff.map(u => `<tr${u.ready ? "" : ` style="opacity:.55"`}><td><b>${esc(u.name)}</b></td>${u.days.map(a => `<td class="n">${cell(a)}</td>`).join("")}<td>${u.submitted_at ? pill([u.late ? "Late" : "Sent", u.late ? "warn" : "ok"]) : pill(["Not sent", "bad"])}</td></tr>`).join("") || `<tr><td colspan="9" class="empty">No active staff.</td></tr>`}</tbody></table></div>`, root => {
+    root.querySelector("#at_prev").onclick = () => availabilityTeamDrawer(shiftW(-1));
+    root.querySelector("#at_next").onclick = () => availabilityTeamDrawer(shiftW(1));
   });
 }
 

@@ -175,6 +175,39 @@ async function clockShift(env, s, action, by, note, actor) {
   return { ok: true, time: now.time };
 }
 
+// ---------- weekly availability ----------
+// Staff send next week's availability (Monday to Sunday) by Tuesday 23:59 UK time of the week before.
+export const AVAIL_SLOTS = { none: "Not available", all: "Available all day", am: "Mornings only", pm: "Afternoons only", times: "Between set times" };
+const AVAIL_WINDOWS = { all: ["00:00", "23:59"], am: ["07:00", "13:00"], pm: ["12:00", "19:00"] };
+// The week staff are being asked about, and its deadline.
+export function availabilityDue(today) {
+  const week = addDays(mondayOf(today), 7), deadline = addDays(week, -6); // the Tuesday before
+  return { week_start: week, deadline_date: deadline, deadline_time: "23:59", overdue: today > deadline };
+}
+export const availabilityLate = (weekStart, today) => today > addDays(weekStart, -6);
+// Does what they said cover this shift? full / part / no / unknown (nothing given).
+export function availabilityFit(a, shift) {
+  if (!a) return "unknown";
+  if (a.slot === "none") return "no";
+  const [ws, wf] = a.slot === "times" ? [a.start, a.finish] : AVAIL_WINDOWS[a.slot] || [];
+  const s = toMin(shift.start), f = toMin(shift.finish), aS = toMin(ws), aF = toMin(wf);
+  if (s == null || f == null || aS == null || aF == null) return "unknown";
+  if (aS <= s && aF >= f) return "full";
+  return aS < f && aF > s ? "part" : "no";
+}
+const availOut = a => a ? { date: a.date, slot: a.slot, start: a.start || null, finish: a.finish || null, label: a.slot === "times" ? `${a.start}–${a.finish}` : AVAIL_SLOTS[a.slot] } : null;
+async function availabilityFor(env, emails, from, to) {
+  const out = Object.fromEntries(emails.map(e => [e, {}]));
+  if (!emails.length) return out;
+  const { results } = await env.DB.prepare(`SELECT * FROM availability WHERE date BETWEEN ? AND ? AND email IN (${emails.map(() => "?").join(",")})`).bind(from, to, ...emails).all();
+  for (const r of results) out[r.email][r.date] = r;
+  return out;
+}
+async function submittedWeeks(env, weekStart) {
+  const { results } = await env.DB.prepare("SELECT email, submitted_at, late FROM availability_weeks WHERE week_start=?").bind(weekStart).all();
+  return Object.fromEntries(results.map(r => [r.email, r]));
+}
+
 async function arrivalsToday(env, today, clientId) {
   const { results } = await env.DB.prepare(`SELECT s.id,s.start,s.finish,s.clock_in_at,s.clock_out_at,s.clock_in_by,s.clock_note,s.breaks,c.name client_name,u.name worker_name,u.phone worker_phone
     FROM shifts s JOIN clients c ON c.id=s.client_id JOIN users u ON u.email=s.worker_email WHERE s.date=? AND s.status='filled' ${clientId ? "AND s.client_id=?" : ""} ORDER BY s.start`).bind(...(clientId ? [today, clientId] : [today])).all();
@@ -476,8 +509,67 @@ async function api(req, env, url) {
       const checks = (await checksFor(env, [me.email]))[me.email];
       const training = (await trainingFor(env, [me]))[me.email];
       Object.assign(out, { checks, training, qual_level: me.qual_level, blockers: blockers(me, checks, training, null), expiring: expiringFor(checks, today), quals: (await qualsFor(env, [me.email]))[me.email], has_photo: (await photoSet(env, [me.email])).has(me.email), has_pin: !!(await env.DB.prepare("SELECT 1 FROM station_pins WHERE email=?").bind(me.email).first()) });
+      const due = availabilityDue(today);
+      out.availability_due = { ...due, submitted: !!(await env.DB.prepare("SELECT 1 FROM availability_weeks WHERE email=? AND week_start=?").bind(me.email, due.week_start).first()) };
     }
     return json(out);
+  }
+
+  // ===== weekly availability =====
+  if (p === "/api/availability" && method === "GET") {
+    const who = isAdmin && url.searchParams.get("email") ? String(url.searchParams.get("email")).toLowerCase() : me.email;
+    need(role === "staff" || isAdmin);
+    const week = validDate(url.searchParams.get("week")) ? mondayOf(url.searchParams.get("week")) : mondayOf(today);
+    const days = Array.from({ length: 7 }, (_, i) => addDays(week, i));
+    const av = (await availabilityFor(env, [who], days[0], days[6]))[who];
+    const sub = await env.DB.prepare("SELECT submitted_at, late FROM availability_weeks WHERE email=? AND week_start=?").bind(who, week).first();
+    const due = availabilityDue(today);
+    return json({ week_start: week, days: days.map(d => ({ date: d, past: d < today, ...(availOut(av[d]) || { slot: null }) })), submitted_at: sub?.submitted_at || null, late: !!sub?.late,
+      is_due_week: week === due.week_start, deadline_date: addDays(week, -6), deadline_time: "23:59", slots: AVAIL_SLOTS });
+  }
+  if (p === "/api/availability" && method === "PUT") {
+    need(role === "staff");
+    const b = await body();
+    if (!validDate(b.week_start) || mondayOf(b.week_start) !== b.week_start) bad("Pick a week.");
+    const week = b.week_start;
+    if (week < mondayOf(today)) bad("That week has already gone.");
+    if (week > addDays(mondayOf(today), 28)) bad("You can only give availability up to four weeks ahead.");
+    const days = Array.isArray(b.days) ? b.days : [];
+    const rows = [];
+    for (let i = 0; i < 7; i++) {
+      const date = addDays(week, i);
+      if (date < today) continue; // days already gone can't be changed
+      const d = days.find(x => x && x.date === date);
+      if (!d || !d.slot) bad(`Choose an option for ${new Date(date + "T12:00:00Z").toLocaleDateString("en-GB", { weekday: "long", timeZone: "UTC" })}.`);
+      if (!AVAIL_SLOTS[d.slot]) bad("Unknown availability option.");
+      let start = null, finish = null;
+      if (d.slot === "times") {
+        start = String(d.start || ""); finish = String(d.finish || "");
+        if (toMin(start) == null || toMin(finish) == null || toMin(finish) <= toMin(start)) bad(`Check the times for ${date}: the finish must be after the start.`);
+      }
+      rows.push([me.email, date, d.slot, start, finish]);
+    }
+    if (!rows.length) bad("There are no days left to update in that week.");
+    const now = nowIso(), late = availabilityLate(week, today) ? 1 : 0;
+    await env.DB.batch([
+      ...rows.map(r => env.DB.prepare(`INSERT INTO availability(email,date,slot,start,finish,updated_at) VALUES (?,?,?,?,?,?)
+        ON CONFLICT(email,date) DO UPDATE SET slot=excluded.slot, start=excluded.start, finish=excluded.finish, updated_at=excluded.updated_at`).bind(...r, now)),
+      env.DB.prepare(`INSERT INTO availability_weeks(email,week_start,submitted_at,late) VALUES (?,?,?,?)
+        ON CONFLICT(email,week_start) DO UPDATE SET submitted_at=excluded.submitted_at`).bind(me.email, week, now, late),
+    ]);
+    await audit(env, me.email, "availability_set", week, { days: rows.map(r => `${r[1]} ${r[2]}${r[3] ? " " + r[3] + "-" + r[4] : ""}`), late: !!late });
+    return json({ ok: true, late: !!late });
+  }
+  if (p === "/api/availability/team" && method === "GET") {
+    need(isAdmin);
+    const week = validDate(url.searchParams.get("week")) ? mondayOf(url.searchParams.get("week")) : availabilityDue(today).week_start;
+    const days = Array.from({ length: 7 }, (_, i) => addDays(week, i));
+    const { results: staff } = await env.DB.prepare("SELECT * FROM users WHERE role='staff' AND active=1 ORDER BY name").all();
+    const av = await availabilityFor(env, staff.map(u => u.email), days[0], days[6]), subs = await submittedWeeks(env, week);
+    const ch = await checksFor(env, staff.map(u => u.email)), tr = await trainingFor(env, staff);
+    return json({ week_start: week, days, deadline_date: addDays(week, -6), staff: staff.map(u => ({ email: u.email, name: u.name, phone: u.phone,
+      ready: !blockers(u, ch[u.email], tr[u.email], null).length, submitted_at: subs[u.email]?.submitted_at || null, late: !!subs[u.email]?.late,
+      days: days.map(d => availOut(av[u.email][d])) })) });
   }
 
   // ===== shifts: list =====
@@ -568,6 +660,10 @@ async function api(req, env, url) {
           if (await clashes(env, u.email, s)) why.push("already booked on an overlapping shift");
           out.candidates.push({ email: u.email, name: u.name, phone: u.phone, blockers: why });
         }
+        const av = await availabilityFor(env, staff.map(u => u.email), s.date, s.date);
+        const order = { full: 0, part: 1, unknown: 2, no: 3 };
+        for (const c of out.candidates) { const a = av[c.email][s.date]; c.avail = { fit: availabilityFit(a, s), label: availOut(a)?.label || "No availability given" }; }
+        out.candidates.sort((a, b) => order[a.avail.fit] - order[b.avail.fit] || a.name.localeCompare(b.name));
       }
       return json(out);
     }
@@ -1093,7 +1189,13 @@ async function api(req, env, url) {
       toInvoice: await q("SELECT COUNT(*) n FROM shifts WHERE ts_status='approved' AND invoice_id IS NULL AND status='filled'"),
       pendingChecks: await q("SELECT COUNT(*) n FROM checks c JOIN users u ON u.email=c.email WHERE c.status='pending' AND u.active=1"),
       arrivals: await arrivalsToday(env, today),
-      staffCount: staff.length, readyCount: staff.length - notReady.length, notReady, expiring: expiring.sort((a, b) => a.expires_on.localeCompare(b.expires_on)),
+      staffCount: staff.length, readyCount: staff.length - notReady.length, notReady,
+      availability: await (async () => {
+        const due = availabilityDue(today), subs = await submittedWeeks(env, due.week_start);
+        const ready = staff.filter(u => !notReady.some(n => n.email === u.email));
+        return { ...due, submitted: ready.filter(u => subs[u.email]).length, ready: ready.length,
+          missing: ready.filter(u => !subs[u.email]).map(u => ({ email: u.email, name: u.name, phone: u.phone })) };
+      })(), expiring: expiring.sort((a, b) => a.expires_on.localeCompare(b.expires_on)),
     });
   }
 

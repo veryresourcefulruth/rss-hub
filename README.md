@@ -56,3 +56,12 @@ person for 15 minutes. Backup: staff tap "I've arrived" / "I'm leaving" on their
 within about 300 m of the nursery (location found from the postcode in the nursery's address, or set from the iPad).
 Signing out fills in the timesheet (from the booked start, or later if they arrived late, to when they left, less the
 booked break) and sends it to the manager to approve. Staff can also record "Start break" and "End break"; when they do, the break actually taken is deducted instead of the booked one. New shifts default to a 30-minute unpaid break. The office sees arrivals and anyone 15+ minutes late on Today.
+
+## Weekly availability
+
+Staff tell RSS when they can work, day by day, under **My availability** (not available, all day, mornings, afternoons,
+or set times). Next week's availability (Monday to Sunday) is due by **Tuesday 23:59 UK time** the week before; anything
+sent after that is marked late. Staff see a reminder on My shifts until they send it, and can update days that haven't
+passed, up to four weeks ahead. The office sees who has and hasn't sent it on **Today** (with a week grid), and when
+filling a shift each ready candidate shows whether they said they're available, with available staff listed first.
+Availability guides booking; it doesn't block it. Nursery managers can't see it.

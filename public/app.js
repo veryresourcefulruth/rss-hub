@@ -40,7 +40,7 @@ const isAdmin = () => me && (me.role === "owner" || me.role === "coordinator");
 const TABS = {
   staff: [["shifts", "My shifts"], ["availability", "My availability"], ["hours", "My hours"], ["checks", "My checks"], ["training", "Training"]],
   manager: [["shifts", "Our shifts"], ["station", "Sign-in station"], ["staff", "Our staff"], ["request", "Request cover"], ["hours", "Sign off hours"]],
-  admin: [["today", "Today"], ["shifts", "Shifts"], ["staff", "Staff"], ["nurseries", "Nurseries"], ["billing", "Hours & billing"], ["training", "Training"], ["settings", "Settings"]],
+  admin: [["today", "Today"], ["shifts", "Shifts"], ["availability", "Availability"], ["staff", "Staff"], ["nurseries", "Nurseries"], ["billing", "Hours & billing"], ["training", "Training"], ["settings", "Settings"]],
 };
 const tabsFor = () => TABS[isAdmin() ? "admin" : me.role];
 
@@ -637,6 +637,7 @@ async function signOffList(path) {
    ===================================================================== */
 const ADMIN = {
   station: () => stationView(),
+  availability: () => availabilityTeam(),
   training: () => trainingAdmin(),
   async today() {
     const d = await api("/api/dashboard");
@@ -650,7 +651,7 @@ const ADMIN = {
     <div class="panel" style="margin-top:24px"><div class="section-h" style="margin:0 0 8px"><h3 style="margin:0">Today's arrivals</h3><button class="btn ghost sm" id="toStation">Open a sign-in station</button></div>
       ${d.arrivals.length ? `<div class="tbl"><table><thead><tr><th>Worker</th><th>Nursery</th><th>Booked</th><th>Arrived</th><th>Break</th><th>Left</th></tr></thead><tbody>${d.arrivals.map(a => `<tr${a.late ? ` class="late"` : ""}><td><b>${esc(a.worker_name)}</b>${a.late && a.worker_phone ? ` <a href="tel:${esc(a.worker_phone)}">Call</a>` : ""}</td><td>${esc(a.client_name)}</td><td class="n">${a.start}–${a.finish}</td>
         <td class="n">${a.clock_in_at ? ukClock(a.clock_in_at) + (a.clock_in_by === "phone" ? " 📱" : a.clock_in_by === "manager" ? " (manager)" : "") : a.late ? `<b style="color:var(--bad)">Not arrived</b>` : "–"}</td><td class="n">${a.breaks.length ? breakText(a) + (onBreak(a) ? " (on break)" : "") : "–"}</td><td class="n">${a.clock_out_at ? ukClock(a.clock_out_at) : "–"}</td></tr>`).join("")}</tbody></table></div>` : `<p class="empty">Nobody is booked today.</p>`}</div>
-    ${(() => { const av = d.availability; return `<div class="panel" style="margin-top:24px"><div class="section-h" style="margin:0 0 8px"><h3 style="margin:0">Availability for the ${weekLabel(av.week_start)}</h3><button class="btn ghost sm" id="toAvailTeam">See the week</button></div>
+    ${(() => { const av = d.availability; return `<div class="panel" style="margin-top:24px"><div class="section-h" style="margin:0 0 8px"><h3 style="margin:0">Availability for the ${weekLabel(av.week_start)}</h3><button class="btn ghost sm" id="toAvailTeam">See everyone's week</button></div>
       <p class="note" style="margin-top:0">${av.submitted} of ${av.ready} staff ready to book have sent it. Due ${deadlineLabel(av.deadline_date)}${av.overdue ? " (deadline passed)" : ""}.</p>
       ${av.missing.length ? `<div class="note"><b style="color:${av.overdue ? "var(--bad)" : "inherit"}">Not sent yet:</b> ${av.missing.map(m => esc(m.name) + (m.phone ? ` <a href="tel:${esc(m.phone)}">Call</a>` : "")).join(", ")}</div>` : `<p class="empty">Everyone has sent their availability.</p>`}</div>`; })()}
     <div class="grid2" style="margin-top:24px">
@@ -659,7 +660,7 @@ const ADMIN = {
     </div>`;
     $$("[data-go]").forEach(b => b.onclick = () => go(b.dataset.go));
     $("#toStation").onclick = () => go("station");
-    $("#toAvailTeam").onclick = () => availabilityTeamDrawer(d.availability.week_start);
+    $("#toAvailTeam").onclick = () => { cache.teamWeek = d.availability.week_start; go("availability"); };
     $$("[data-staff]").forEach(b => b.onclick = () => staffDrawer(b.dataset.staff));
   },
 
@@ -882,19 +883,19 @@ async function shiftDrawer(id) {
   });
 }
 
-async function availabilityTeamDrawer(week) {
-  openDrawer(`<p class="loading">Loading…</p>`);
-  const t = await api("/api/availability/team?week=" + week);
+// RSS view of everyone's availability for a week, as its own tab.
+async function availabilityTeam() {
+  const t = await api("/api/availability/team" + (cache.teamWeek ? "?week=" + cache.teamWeek : ""));
   const shiftW = n => { const d = new Date(t.week_start + "T12:00:00Z"); d.setUTCDate(d.getUTCDate() + 7 * n); return d.toISOString().slice(0, 10); };
   const cell = a => !a ? `<span class="note">–</span>` : a.slot === "none" ? `<span style="color:var(--bad)">No</span>` : a.slot === "all" ? `<b style="color:var(--ok)">All day</b>` : a.slot === "am" ? "AM" : a.slot === "pm" ? "PM" : esc(a.label);
-  setDrawer(`<p class="eyebrow">Staff availability</p><h2>${weekLabel(t.week_start).replace("week beginning ", "W/c ")}</h2>
-    <p class="note">Due ${deadlineLabel(t.deadline_date)}. "–" means nothing given for that day. Staff not ready to book are shown faded.</p>
+  const sent = t.staff.filter(u => u.ready && u.submitted_at).length, ready = t.staff.filter(u => u.ready).length;
+  $("#app").innerHTML = `<div class="panel"><p class="eyebrow">Staff availability</p><h2>${weekLabel(t.week_start).replace("week beginning ", "W/c ")}</h2>
+    <p class="note">${sent} of ${ready} staff ready to book have sent it. Due ${deadlineLabel(t.deadline_date)}. "–" means nothing given for that day. Staff not ready to book are shown faded.</p>
     <div class="row" style="margin-bottom:10px"><button class="btn ghost sm" id="at_prev">← Earlier week</button><button class="btn ghost sm" id="at_next">Later week →</button></div>
     <div class="tbl"><table><thead><tr><th>Staff</th>${t.days.map(d => `<th>${dayName(d).split(" ").slice(0, 2).join(" ")}</th>`).join("")}<th>Sent</th></tr></thead><tbody>
-    ${t.staff.map(u => `<tr${u.ready ? "" : ` style="opacity:.55"`}><td><b>${esc(u.name)}</b></td>${u.days.map(a => `<td class="n">${cell(a)}</td>`).join("")}<td>${u.submitted_at ? pill([u.late ? "Late" : "Sent", u.late ? "warn" : "ok"]) : pill(["Not sent", "bad"])}</td></tr>`).join("") || `<tr><td colspan="9" class="empty">No active staff.</td></tr>`}</tbody></table></div>`, root => {
-    root.querySelector("#at_prev").onclick = () => availabilityTeamDrawer(shiftW(-1));
-    root.querySelector("#at_next").onclick = () => availabilityTeamDrawer(shiftW(1));
-  });
+    ${t.staff.map(u => `<tr${u.ready ? "" : ` style="opacity:.55"`}><td><b>${esc(u.name)}</b>${!u.submitted_at && u.phone ? ` <a href="tel:${esc(u.phone)}">Call</a>` : ""}</td>${u.days.map(a => `<td class="n">${cell(a)}</td>`).join("")}<td>${u.submitted_at ? pill([u.late ? "Late" : "Sent", u.late ? "warn" : "ok"]) : pill(["Not sent", "bad"])}</td></tr>`).join("") || `<tr><td colspan="9" class="empty">No active staff.</td></tr>`}</tbody></table></div></div>`;
+  $("#at_prev").onclick = () => { cache.teamWeek = shiftW(-1); render(); };
+  $("#at_next").onclick = () => { cache.teamWeek = shiftW(1); render(); };
 }
 
 async function staffDrawer(email) {

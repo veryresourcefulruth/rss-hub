@@ -62,6 +62,6 @@ booked break) and sends it to the manager to approve. Staff can also record "Sta
 Staff tell RSS when they can work, day by day, under **My availability** (not available, all day, mornings, afternoons,
 or set times). Next week's availability (Monday to Sunday) is due by **Tuesday 23:59 UK time** the week before; anything
 sent after that is marked late. Staff see a reminder on My shifts until they send it, and can update days that haven't
-passed, up to four weeks ahead. The office sees who has and hasn't sent it on **Today** (with a week grid), and when
+passed, up to four weeks ahead. The office sees who has and hasn't sent it on **Today** and the full week grid under the **Availability** tab, and when
 filling a shift each ready candidate shows whether they said they're available, with available staff listed first.
 Availability guides booking; it doesn't block it. Nursery managers can't see it.

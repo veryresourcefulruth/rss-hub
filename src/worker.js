@@ -1393,6 +1393,7 @@ async function api(req, env, url) {
 export default {
   async fetch(req, env) {
     const url = new URL(req.url);
+    if (url.pathname === "/api/version") return new Response(JSON.stringify({ version: env.CF_VERSION_METADATA?.id || "dev" }), { headers: { "content-type": "application/json", "cache-control": "no-store" } });
     if (url.pathname.startsWith("/api/")) {
       try { return await api(req, env, url); }
       catch (e) {

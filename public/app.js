@@ -730,9 +730,25 @@ const ADMIN = {
   },
 
   async billing() {
-    const [clients, invoices] = await Promise.all([api("/api/clients"), api("/api/invoices")]);
+    const [clients, invoices, worked] = await Promise.all([api("/api/clients"), api("/api/invoices"), api(`/api/billing?from=${shiftBack(400)}&to=${me.today}`)]);
     const first = me.today.slice(0, 8) + "01";
-    $("#app").innerHTML = `<div id="tsHost"></div>
+    // Hours worked at each branch: ready to invoice (approved, not invoiced) and still waiting for approval.
+    const byClient = clients.map(c => {
+      const rows = worked.filter(s => s.client_id === c.id && !s.invoice_id);
+      const ready = rows.filter(s => s.ts_status === "approved"), waiting = rows.filter(s => s.ts_status !== "approved");
+      return { c, ready, waiting, mins: ready.reduce((a, s) => a + (s.actMins || 0), 0), net: ready.reduce((a, s) => a + Math.round((s.actMins || 0) / 60 * s.charge_rate), 0) };
+    }).filter(x => x.ready.length || x.waiting.length);
+    const why = s => s.ts_status === "submitted" ? "waiting for the nursery to approve" : s.ts_status === "queried" ? "queried by the nursery" : "no hours entered yet";
+    const shiftLine = s => `<tr><td class="n">${fullDate(s.date)}</td><td>${esc(s.worker_name || "")}</td><td class="n">${s.act_start ? `${s.act_start}–${s.act_finish}` : `${s.start}–${s.finish} (booked)`}</td><td class="n">${s.actMins != null ? hrs(s.actMins) : "–"}</td>`;
+    const readyHtml = `<div class="panel"><h2 style="margin-top:0">Hours worked, by branch</h2>
+      <p class="note">Every past shift that hasn't been invoiced yet. Approved hours can be invoiced straight away. The rest need the nursery to approve them first.</p>
+      ${byClient.length ? byClient.map(x => `<div class="bill-branch"><div class="section-h" style="margin:0"><div><h3 style="margin:0">${esc(x.c.name)}</h3>
+        <div class="note">${x.ready.length ? `<b>${x.ready.length} shift${x.ready.length === 1 ? "" : "s"} ready to invoice</b> · ${hrs(x.mins)} · ${gbp(x.net)} + VAT if registered · ${fullDate(x.ready[0].date)} to ${fullDate(x.ready[x.ready.length - 1].date)}` : "Nothing ready to invoice yet"}${x.waiting.length ? ` · <span style="color:var(--bad)">${x.waiting.length} not approved yet</span>` : ""}</div></div>
+        ${x.ready.length ? `<button class="btn sm" data-billnow="${x.c.id}" data-from="${x.ready[0].date}" data-to="${x.ready[x.ready.length - 1].date}">Invoice ${x.ready.length} shift${x.ready.length === 1 ? "" : "s"}</button>` : ""}</div>
+        <details><summary class="note">Show the shifts</summary><div class="tbl"><table><thead><tr><th>Date</th><th>Worker</th><th>Times</th><th>Hours</th><th>Status</th></tr></thead><tbody>
+        ${x.ready.map(s => shiftLine(s) + `<td>${pill(["Approved", "ok"])}</td></tr>`).join("")}${x.waiting.map(s => shiftLine(s) + `<td>${pill([why(s), s.ts_status === "queried" ? "bad" : "warn"])}</td></tr>`).join("")}</tbody></table></div></details></div>`).join("")
+      : `<p class="empty">No un-invoiced hours. Everything worked so far has been invoiced.</p>`}</div>`;
+    $("#app").innerHTML = `${readyHtml}<div id="tsHost" style="margin-top:28px"></div>
     <div class="grid2" style="margin-top:28px">
       <div class="panel"><h3 style="margin-top:0">Create an invoice</h3>
         <p class="note">Bills every approved, not-yet-invoiced shift for the nursery in the dates you pick, at the rate locked in when the shift was booked.</p>
@@ -766,6 +782,11 @@ const ADMIN = {
     };
     $("#pe_go").onclick = () => download(`/api/pay.csv?from=${$("#pe_f").value}&to=${$("#pe_t").value}`, `rss-pay-${$("#pe_f").value}-to-${$("#pe_t").value}.csv`);
     $$("[data-inv]").forEach(b => b.onclick = () => invoiceDrawer(b.dataset.inv));
+    $$("[data-billnow]").forEach(b => b.onclick = async () => {
+      if (!b.dataset.armed) { b.dataset.armed = 1; b.textContent = "Click again to create the invoice"; return; }
+      let res;
+      if (await act(b, async () => { res = await api("/api/invoices", { method: "POST", body: { client_id: +b.dataset.billnow, from: b.dataset.from, to: b.dataset.to } }); })) { toast(`Invoice ${res.number} created`); render(); invoiceDrawer(res.id); }
+    });
   },
 
   async settings() {

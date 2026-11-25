@@ -311,3 +311,4 @@ tr.late td{background:var(--bad-soft)}
 .st-card.break .st-act{color:var(--ink)}
 .pp-choose{display:grid;gap:12px;margin:18px 0 14px}
 .pp-choose .btn{font-size:1.2rem;padding:16px;justify-content:center;text-align:center}
+.bill-branch{border-top:1px solid var(--line);padding:14px 0}.bill-branch:first-of-type{border-top:0}.bill-branch details{margin-top:6px}

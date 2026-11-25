@@ -102,7 +102,7 @@ function openDrawer(html, wire) {
   if (wire) wire($("#dbody"));
 }
 function escClose(e) { if (e.key === "Escape") closeDrawer(); }
-function closeDrawer() { $("#drawer-root").innerHTML = ""; document.removeEventListener("keydown", escClose); }
+function closeDrawer() { $("#drawer-root").innerHTML = ""; document.removeEventListener("keydown", escClose); cache.payReturn = null; }
 function setDrawer(html, wire) { $("#dbody").innerHTML = html; if (wire) wire($("#dbody")); }
 
 /* ---------- shared pieces ---------- */
@@ -136,7 +136,7 @@ function checkForm(email, type, c, admin, user) {
     <label class="fld" for="ck_ref">${esc(def.refLabel)}<input type="text" id="ck_ref" value="${esc(c?.ref)}"></label>
     ${def.issued ? `<label class="fld" for="ck_iss">Issue date<input type="date" id="ck_iss" value="${esc(c?.issued_on)}"></label>` : ""}
     ${def.expires ? (def.group === "training" && def.years
-      ? `<label class="fld" for="ck_exp">Expiry date<input type="date" id="ck_exp" value="${esc(c?.expires_on)}" disabled><span class="note" style="font-weight:400">Set automatically: 1 year after the issue date (RSS policy).</span></label>`
+      ? `<label class="fld" for="ck_exp">Expiry date<input type="date" id="ck_exp" value="${esc(c?.expires_on)}" disabled><span class="note" style="font-weight:400">Set automatically: ${def.years} year${def.years === 1 ? "" : "s"} after the issue date.</span></label>`
       : `<label class="fld" for="ck_exp">${type === "rtw" ? "Permission ends (blank if no time limit)" : "Expiry / renewal date"}<input type="date" id="ck_exp" value="${esc(c?.expires_on)}"></label>`) : ""}
     ${type === "dbs" ? `<label class="fld" for="ck_dt">DBS type<select id="ck_dt"><option value="">Choose…</option>${me.dbsTypes.map(t => `<option ${d.dbs_type === t ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></label>
       <label class="fld" for="ck_usn">Update Service number<input type="text" id="ck_usn" value="${esc(d.update_service_no)}" placeholder="e.g. C1234567890"></label>
@@ -668,23 +668,36 @@ const ADMIN = {
   },
 
   async shifts() {
-    const f = cache.shiftFilter || { show: "action", client: "" };
-    const [list, clients] = await Promise.all([api(`/api/shifts?from=${f.show === "past" ? shiftBack(60) : f.show === "action" || f.show === "upcoming" ? me.today : shiftBack(14)}&to=${f.show === "past" ? me.today : ""}${f.client ? "&client=" + f.client : ""}`), api("/api/clients")]);
+    const f = cache.shiftFilter || { show: "action", client: "", from: "", to: "" };
+    // Default dates for each view; the date boxes override them.
+    const past = ["approved", "awaiting", "past"].includes(f.show);
+    const from = f.from || (past ? shiftBack(30) : f.show === "all" ? shiftBack(14) : me.today), to = f.to || (past ? me.today : "");
+    const [list, clients] = await Promise.all([api(`/api/shifts?from=${from}&to=${to}${f.client ? "&client=" + f.client : ""}`), api("/api/clients")]);
     cache.clients = clients;
     let rows = list;
     if (f.show === "action") rows = list.filter(s => s.status === "requested" || s.status === "open" || s.status === "pending");
-    if (f.show === "upcoming") rows = list.filter(s => s.status === "filled");
+    if (f.show === "upcoming") rows = list.filter(s => s.status === "filled" && s.date >= me.today);
+    if (f.show === "approved") rows = list.filter(s => s.status === "filled" && s.ts_status === "approved").reverse();
+    if (f.show === "awaiting") rows = list.filter(s => s.status === "filled" && s.date <= me.today && s.ts_status !== "approved").reverse();
     if (f.show === "past") rows = list.filter(s => s.date < me.today).reverse();
+    const worked = rows.filter(s => s.actMins != null && s.status === "filled");
+    const summary = ["approved", "awaiting", "past"].includes(f.show) && rows.length ? `<p class="note">${rows.length} shift${rows.length === 1 ? "" : "s"}${worked.length ? ` · ${hrs(worked.reduce((a, s) => a + s.actMins, 0))} worked` : ""}${f.show === "approved" ? ` · ${rows.filter(s => s.invoice_id).length} invoiced, ${rows.filter(s => !s.invoice_id).length} not invoiced yet` : ""}.</p>` : "";
     $("#app").innerHTML = `<div class="section-h"><div class="filters">
-      <select id="f_show" aria-label="Show">${[["action", "Needs filling or confirming"], ["upcoming", "Booked, upcoming"], ["all", "Everything"], ["past", "Past 60 days"]].map(([v, l]) => `<option value="${v}" ${f.show === v ? "selected" : ""}>${l}</option>`).join("")}</select>
-      <select id="f_client" aria-label="Nursery"><option value="">All nurseries</option>${clients.map(c => `<option value="${c.id}" ${f.client == c.id ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select></div>
+      <select id="f_show" aria-label="Show">${[["action", "Needs filling or confirming"], ["upcoming", "Booked, upcoming"], ["approved", "Approved hours"], ["awaiting", "Hours not approved yet"], ["past", "All past shifts"], ["all", "Everything"]].map(([v, l]) => `<option value="${v}" ${f.show === v ? "selected" : ""}>${l}</option>`).join("")}</select>
+      <select id="f_client" aria-label="Nursery"><option value="">All nurseries</option>${clients.map(c => `<option value="${c.id}" ${f.client == c.id ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select>
+      <label class="note" for="f_from">From <input type="date" id="f_from" value="${from}"></label><label class="note" for="f_to">To <input type="date" id="f_to" value="${to}"></label>
+      ${f.from || f.to ? `<button class="link-btn" id="f_reset">Reset dates</button>` : ""}</div>
       <button class="btn" id="newShift" ${clients.length ? "" : "disabled title='Add a nursery first'"}>New shift</button></div>
     ${clients.length ? "" : `<div class="callout">Add your nurseries first, in the Nurseries tab.</div>`}
+    ${summary}
     <div class="cards">${rows.length ? rows.map(s => `<button class="card ${s.status === "requested" ? "attn" : s.status === "filled" ? "ok" : ""}" data-shift="${s.id}" style="text-align:left;cursor:pointer;font:inherit;color:inherit">
       <div class="section-h" style="margin:0;width:100%"><h4>${esc(s.client_name)}</h4>${shiftWhen(s)}</div>
-      <div class="meta">${pill(STATUS[s.status])}${clockPill(s)}${TS[s.ts_status] ? pill(TS[s.ts_status]) : ""}<span>${shiftReqs(s)}</span>${s.worker_name ? `<b style="color:var(--ink)">${esc(s.worker_name)}</b>` : ""}</div></button>`).join("") : `<p class="empty">No shifts to show.</p>`}</div>`;
-    $("#f_show").onchange = e => { cache.shiftFilter = { ...f, show: e.target.value }; render(); };
+      <div class="meta">${pill(STATUS[s.status])}${clockPill(s)}${TS[s.ts_status] ? pill(TS[s.ts_status]) : ""}${s.invoice_id ? pill(["Invoiced", ""]) : ""}<span>${s.actMins != null ? `Worked ${s.act_start}–${s.act_finish} = ${hrs(s.actMins)}` : shiftReqs(s)}</span>${s.worker_name ? `<b style="color:var(--ink)">${esc(s.worker_name)}</b>` : ""}</div></button>`).join("") : `<p class="empty">No shifts to show.</p>`}</div>`;
+    $("#f_show").onchange = e => { cache.shiftFilter = { ...f, show: e.target.value, from: "", to: "" }; render(); };
     $("#f_client").onchange = e => { cache.shiftFilter = { ...f, client: e.target.value }; render(); };
+    $("#f_from").onchange = e => { cache.shiftFilter = { ...f, from: e.target.value, to: f.to || to }; render(); };
+    $("#f_to").onchange = e => { cache.shiftFilter = { ...f, to: e.target.value, from: f.from || from }; render(); };
+    if ($("#f_reset")) $("#f_reset").onclick = () => { cache.shiftFilter = { ...f, from: "", to: "" }; render(); };
     $("#newShift").onclick = () => openDrawer(`<p class="eyebrow">New shift</p><h2>Add a shift</h2>${shiftFormHtml({ date: me.today, start: "08:00", finish: "18:00", break_min: 30, client_id: clients[0]?.id }, { count: true, clients })}
       <label class="opt" for="sf_pub"><input type="checkbox" id="sf_pub" checked><span>Offer it to all eligible staff now</span></label>
       <p class="err" id="sf_err"></p><div class="row"><button class="btn" id="sf_go">Create</button></div>`, root => {
@@ -756,10 +769,11 @@ const ADMIN = {
         <label class="fld" for="iv_f">From<input type="date" id="iv_f" value="${first}"></label><label class="fld" for="iv_t">To<input type="date" id="iv_t" value="${me.today}"></label></div>
         <div id="iv_prev" class="note"></div><p class="err" id="iv_err"></p>
         <div class="row"><button class="btn ghost" id="iv_check">Preview</button><button class="btn" id="iv_go">Create invoice</button></div></div>
-      <div class="panel"><h3 style="margin-top:0">Pay export</h3>
-        <p class="note">A spreadsheet of approved hours per worker, for payroll.</p>
-        <div class="form-grid"><label class="fld" for="pe_f">From<input type="date" id="pe_f" value="${first}"></label><label class="fld" for="pe_t">To<input type="date" id="pe_t" value="${me.today}"></label></div>
-        <div class="row"><button class="btn" id="pe_go">Download pay CSV</button></div></div>
+      <div class="panel"><h3 style="margin-top:0">Payroll</h3>
+        <p class="note">Check each worker's pay for approved hours, fix anything wrong, then download the spreadsheet for payroll.</p>
+        <div class="form-grid"><label class="fld" for="pe_f">From<input type="date" id="pe_f" value="${cache.payFrom || payStart()}"></label><label class="fld" for="pe_t">To<input type="date" id="pe_t" value="${cache.payTo || payEnd()}"></label></div>
+        <p class="note">Default dates follow your pay cut-off: from the 28th to the 27th.</p>
+        <div class="row"><button class="btn" id="pe_prev">Preview payroll</button><button class="btn ghost" id="pe_go">Download pay CSV</button></div></div>
     </div>
     <div class="section-h" style="margin-top:28px"><h2>Invoices</h2></div>
     <div class="tbl"><table><thead><tr><th>Number</th><th>Nursery</th><th>Period</th><th>Total</th><th>Issued</th><th>Due</th><th></th></tr></thead><tbody>
@@ -780,6 +794,7 @@ const ADMIN = {
       const { c, f, t } = range(); let res;
       if (await act($("#iv_go"), async () => { res = await api("/api/invoices", { method: "POST", body: { client_id: c, from: f, to: t } }); }, $("#iv_err"))) { toast(`Invoice ${res.number} created`); render(); invoiceDrawer(res.id); }
     };
+    $("#pe_prev").onclick = () => { cache.payFrom = $("#pe_f").value; cache.payTo = $("#pe_t").value; payrollPreview(cache.payFrom, cache.payTo); };
     $("#pe_go").onclick = () => download(`/api/pay.csv?from=${$("#pe_f").value}&to=${$("#pe_t").value}`, `rss-pay-${$("#pe_f").value}-to-${$("#pe_t").value}.csv`);
     $$("[data-inv]").forEach(b => b.onclick = () => invoiceDrawer(b.dataset.inv));
     $$("[data-billnow]").forEach(b => b.onclick = async () => {
@@ -870,7 +885,13 @@ async function shiftDrawer(id) {
      ${s.invoice_id ? `<div class="note">On an invoice.</div>` : ""}
      <div class="row" style="margin-top:8px">${s.ts_status === "none" && s.date <= me.today ? `<button class="btn sm" id="sd_ts">Enter hours for them</button>` : ""}
      ${s.ts_status === "submitted" || s.ts_status === "queried" ? `<button class="btn sm" id="sd_appr">Approve hours on the nursery's behalf</button>` : ""}
-     ${s.ts_status === "none" ? `<button class="btn ghost sm" id="sd_un">Unassign</button>` : ""}</div><p class="err" id="sd_err1"></p></div>` : ""}
+     ${s.ts_status === "none" ? `<button class="btn ghost sm" id="sd_un">Unassign</button>` : ""}
+     ${s.ts_status === "approved" && !s.invoice_id ? `<button class="btn ghost sm" id="sd_fix">Correct hours or pay rate</button>` : ""}</div><p class="err" id="sd_err1"></p>
+     <div id="sd_fixform" hidden><div class="form-grid"><label class="fld" for="fx_s">Start<input type="time" id="fx_s" value="${esc(s.act_start)}"></label><label class="fld" for="fx_f">Finish<input type="time" id="fx_f" value="${esc(s.act_finish)}"></label>
+       <label class="fld" for="fx_b">Unpaid break (min)<input type="number" id="fx_b" min="0" max="240" value="${s.act_break ?? 0}"></label><label class="fld" for="fx_p">Pay rate (£/h)<input type="text" id="fx_p" inputmode="decimal" value="${s.pay_rate != null ? (s.pay_rate / 100).toFixed(2) : ""}"></label></div>
+       <label class="fld" for="fx_r">Reason for the correction (kept on record)<input type="text" id="fx_r" style="max-width:none" placeholder="e.g. Manager confirmed she left at 16:30"></label>
+       <p class="err" id="fx_e"></p><div class="row"><button class="btn sm" id="fx_go">Save correction</button></div></div></div>` : ""}
+  ${cache.payReturn ? `<p><button class="link-btn" id="sd_back">← Back to payroll preview</button></p>` : ""}
   ${unfilled ? `<h3>Ready to work this shift (${ready.length})</h3>
     ${ready.length ? `<div class="cards">${ready.map(c => `<div class="check-row"><label class="opt" style="margin:0;border:0;padding:0" for="cand_${c.email}"><input type="checkbox" class="cand" id="cand_${c.email}" value="${esc(c.email)}"><span><b>${esc(c.name)}</b>${c.phone ? ` <span class="note">${esc(c.phone)}</span>` : ""} ${pill(FIT[c.avail?.fit || "unknown"])}${c.avail && c.avail.fit !== "unknown" ? ` <span class="note">${esc(c.avail.label)}</span>` : ""}</span></label>
       <button class="btn sm" data-assign="${esc(c.email)}">Ask to work</button></div>`).join("")}</div>
@@ -897,6 +918,11 @@ async function shiftDrawer(id) {
     if (g("sd_un")) g("sd_un").onclick = async () => { if (await act(g("sd_un"), () => api(`/api/shifts/${id}/unassign`, { method: "POST", body: { reason: "Unassigned by RSS" } }), g("sd_err1"))) { toast("Unassigned. The shift needs filling again."); reopen(); } };
     if (g("sd_appr")) g("sd_appr").onclick = async () => { if (await act(g("sd_appr"), () => api(`/api/shifts/${id}/approve`, { method: "POST", body: {} }), g("sd_err1"))) { toast("Approved"); reopen(); } };
     if (g("sd_ts")) g("sd_ts").onclick = () => { closeDrawer(); timesheetDrawer(s); };
+    if (g("sd_fix")) g("sd_fix").onclick = () => { g("sd_fixform").hidden = false; g("sd_fix").hidden = true; };
+    if (g("fx_go")) g("fx_go").onclick = async () => {
+      if (await act(g("fx_go"), () => api(`/api/shifts/${id}/correct`, { method: "POST", body: { start: g("fx_s").value, finish: g("fx_f").value, break_min: g("fx_b").value, pay_rate: g("fx_p").value, reason: g("fx_r").value } }), g("fx_e"))) { toast("Corrected"); reopen(); }
+    };
+    if (g("sd_back")) g("sd_back").onclick = () => { const [f, t] = cache.payReturn; cache.payReturn = null; payrollPreview(f, t); };
     if (g("sd_save")) g("sd_save").onclick = async () => {
       const b = readShiftForm(root);
       const run = async override => api("/api/shifts/" + id, { method: "PUT", body: { ...b, override } });
@@ -904,6 +930,33 @@ async function shiftDrawer(id) {
       catch (e) { g("sd_save").disabled = false; g("sd_err3").textContent = e.message + (e.status === 409 ? " Unassign them first, or change it back." : ""); }
     };
     if (g("sd_cancel")) g("sd_cancel").onclick = () => cancelShift(id, g("sd_cancel"));
+  });
+}
+
+// Pay period: 28th of last month to 27th of this month (hours cut-off is the 27th; pay by the 10th).
+function payEnd() { const t = new Date(me.today + "T12:00:00Z"); const d = new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth() - (t.getUTCDate() > 27 ? 0 : 1), 27)); return d.toISOString().slice(0, 10); }
+function payStart() { const e = new Date(payEnd() + "T12:00:00Z"); return new Date(Date.UTC(e.getUTCFullYear(), e.getUTCMonth() - 1, 28)).toISOString().slice(0, 10); }
+
+// Payroll preview: each worker's pay for approved hours in the period, with anything that needs checking flagged.
+async function payrollPreview(from, to) {
+  openDrawer(`<p class="loading">Working out pay…</p>`);
+  let d; try { d = await api(`/api/pay?from=${from}&to=${to}`); } catch (e) { return setDrawer(`<p class="err">${esc(e.message)}</p>`); }
+  const flagged = d.workers.filter(w => w.flagCount).length;
+  setDrawer(`<p class="eyebrow">Payroll preview · ${fullDate(from)} – ${fullDate(to)}</p><h2>${gbp(d.totals.total)} for ${d.workers.length} worker${d.workers.length === 1 ? "" : "s"}</h2>
+    <p class="note">${hrs(d.totals.mins)} approved · basic ${gbp(d.totals.basic)}${d.holiday_pct ? ` · holiday pay ${d.holiday_pct}% ${gbp(d.totals.holiday)}` : " · <b>no holiday pay added</b> (set the rolled-up holiday % in Settings)"}. Tax, NI and pension are worked out by your payroll software.</p>
+    ${flagged ? `<div class="callout"><b>${flagged} worker${flagged === 1 ? " has" : "s have"} something to check</b>, marked ⚠ below. Click a shift to open it and correct the hours or pay rate.</div>` : `<div class="callout exp">Nothing unusual found.</div>`}
+    ${d.excluded.length ? `<div class="callout"><b>${d.excluded.length} shift${d.excluded.length === 1 ? " isn't" : "s aren't"} included</b> because the hours aren't approved yet: ${d.excluded.map(x => `<button class="link-btn" data-pshift="${x.id}">${esc(x.worker_name || "?")}, ${esc(x.client_name)}, ${fullDate(x.date)}</button>`).join("; ")}.</div>` : ""}
+    <div class="tbl"><table><thead><tr><th>Worker</th><th>Shifts</th><th>Hours</th><th>Basic</th>${d.holiday_pct ? "<th>Holiday</th>" : ""}<th>Total</th></tr></thead><tbody>
+    ${d.workers.map((w, i) => `<tr class="pay-w" data-pw="${i}" style="cursor:pointer"><td><b>${esc(w.name)}</b> ${w.flagCount ? `<span style="color:var(--bad)">⚠ ${w.flagCount}</span>` : ""}</td><td class="n">${w.shifts.length}</td><td class="n">${hrs(w.mins)}</td><td class="n">${gbp(w.basic)}</td>${d.holiday_pct ? `<td class="n">${gbp(w.holiday)}</td>` : ""}<td class="n"><b>${gbp(w.total)}</b></td></tr>
+      <tr class="pay-d" id="pw${i}" ${w.flagCount ? "" : "hidden"}><td colspan="${d.holiday_pct ? 6 : 5}">${(w.flags || []).map(f => `<div style="color:var(--bad)">⚠ ${esc(f)}</div>`).join("")}
+        <table class="pay-lines"><tbody>${w.shifts.map(x => `<tr data-pshift="${x.id}" style="cursor:pointer"><td class="n">${fullDate(x.date)}</td><td>${esc(x.client_name)}</td><td class="n">${x.act_start}–${x.act_finish}${x.act_break ? `, ${x.act_break}m break` : ""}</td><td class="n">${hrs(x.mins)}</td><td class="n">${gbp(x.pay_rate)}/h</td><td class="n">${gbp(x.total)}</td></tr>
+          ${x.flags.length ? `<tr><td colspan="6">${x.flags.map(f => `<div style="color:var(--bad)">⚠ ${esc(f)}</div>`).join("")}</td></tr>` : ""}`).join("")}</tbody></table></td></tr>`).join("") || `<tr><td colspan="6" class="empty">No approved hours in these dates.</td></tr>`}
+    </tbody><tfoot><tr><td><b>Total</b></td><td></td><td class="n">${hrs(d.totals.mins)}</td><td class="n">${gbp(d.totals.basic)}</td>${d.holiday_pct ? `<td class="n">${gbp(d.totals.holiday)}</td>` : ""}<td class="n"><b>${gbp(d.totals.total)}</b></td></tr></tfoot></table></div>
+    <p class="note">Click a worker to show or hide their shifts.</p>
+    <div class="row"><button class="btn" id="pp_dl">Looks right: download pay CSV</button></div>`, root => {
+    root.querySelectorAll(".pay-w").forEach(r => r.onclick = () => { const x = root.querySelector("#pw" + r.dataset.pw); x.hidden = !x.hidden; });
+    root.querySelectorAll("[data-pshift]").forEach(r => r.onclick = e => { e.stopPropagation(); cache.payReturn = [from, to]; shiftDrawer(r.dataset.pshift); });
+    root.querySelector("#pp_dl").onclick = () => download(`/api/pay.csv?from=${from}&to=${to}`, `rss-pay-${from}-to-${to}.csv`);
   });
 }
 

@@ -39,8 +39,8 @@ const penceFrom = v => { if (v === "" || v == null) return null; const n = Math.
 // ---------- compliance ----------
 // required: must be verified (and in date) before anyone can be booked.
 // group: vetting (pre-employment checks) or training. core = RSS core training, required before booking.
-// years = validity. RSS policy: all training expires 1 year after the issue date; the server sets the expiry,
-// so it can't be typed in differently. Expired required items block booking.
+// years = validity from the issue date: Safeguarding 2 years, Paediatric First Aid 3 years, other core training 1 year.
+// The server sets the expiry, so it can't be typed in differently. Expired required items block booking.
 export const CHECKS = {
   dbs: { group: "vetting", label: "Enhanced DBS with barred list (children)", required: true, refLabel: "DBS certificate number", issued: true },
   rtw: { group: "vetting", label: "Right to work in the UK", required: true, refLabel: "Share code or document number", expires: true },
@@ -48,14 +48,14 @@ export const CHECKS = {
   ref1: { group: "vetting", label: "Reference 1", required: true, refLabel: "Referee name and organisation" },
   ref2: { group: "vetting", label: "Reference 2", required: true, refLabel: "Referee name and organisation" },
   terms: { group: "vetting", label: "RSS terms of engagement signed", required: true, refLabel: "Version signed", issued: true },
-  safeguarding: { group: "training", core: true, label: "Safeguarding Level 2", required: true, refLabel: "Course and provider", issued: true, expires: true, years: 1 },
+  safeguarding: { group: "training", core: true, label: "Safeguarding Level 2", required: true, refLabel: "Course and provider", issued: true, expires: true, years: 2 },
   prevent: { group: "training", core: true, label: "The Prevent Duty and British Values", required: true, refLabel: "Course and provider", issued: true, expires: true, years: 1 },
   food: { group: "training", core: true, label: "Food Safety & Hygiene", required: true, refLabel: "Course and provider", issued: true, expires: true, years: 1 },
   hs: { group: "training", core: true, label: "Health & Safety in the Workplace", required: true, refLabel: "Course and provider", issued: true, expires: true, years: 1 },
   safesleep: { group: "training", core: true, label: "Safe Sleep", required: true, refLabel: "Course and provider", issued: true, expires: true, years: 1 },
   babies: { group: "training", core: true, label: "Blossoming Babies", required: true, refLabel: "Course and provider", issued: true, expires: true, years: 1 },
   qual: { group: "training", label: "Childcare qualification", required: false, refLabel: "Qualification title", issued: true },
-  pfa: { group: "training", label: "Paediatric first aid (12-hour or 6-hour)", required: false, refLabel: "Provider / certificate number", issued: true, expires: true, years: 1 },
+  pfa: { group: "training", label: "Paediatric first aid (12-hour or 6-hour)", required: false, refLabel: "Provider / certificate number", issued: true, expires: true, years: 3 },
 };
 const EXPIRY_WARN_DAYS = 30;
 export const DBS_TYPES = ["Enhanced with barred list (Child Workforce)", "Enhanced without barred list (Child Workforce)", "Enhanced (Adult Workforce)", "Standard", "Basic"];
@@ -487,6 +487,9 @@ const csvCell = v => `"${String(v ?? "").replace(/"/g, '""')}"`;
 const csv = (rows, filename) => new Response(rows.map(r => r.map(csvCell).join(",")).join("\r\n"), {
   headers: { "content-type": "text/csv; charset=utf-8", "content-disposition": `attachment; filename="${filename}"`, "cache-control": "no-store" } });
 const pounds = p => (p / 100).toFixed(2);
+const NLW_PENCE = 1271;   // National Living Wage, age 21 and over, from 1 April 2026
+const hrsTxt = m => (m / 60).toFixed(2).replace(/\.?0+$/, "") + " h";
+const fullDateUk = d => new Date(d + "T12:00:00Z").toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
 
 // ---------- router ----------
 async function api(req, env, url) {
@@ -791,6 +794,24 @@ async function api(req, env, url) {
       await env.DB.prepare("UPDATE shifts SET ts_status='submitted', act_start=?, act_finish=?, act_break=?, ts_submitted_at=?, ts_comment=? WHERE id=?")
         .bind(b.start, b.finish, br, nowIso(), clean(b.comment, 500) || null, id).run();
       await audit(env, me.email, "timesheet_submit", id, { start: b.start, finish: b.finish, break_min: br });
+      return json({ ok: true });
+    }
+
+    if (action === "correct" && method === "POST") {
+      // RSS office corrects approved hours or the pay rate before payroll (not once the shift is on an invoice).
+      need(isAdmin);
+      if (s.status !== "filled" || s.ts_status !== "approved") bad("Only approved hours can be corrected here.");
+      if (s.invoice_id) bad("This shift is already on an invoice. Void the invoice first, then correct the hours.");
+      const b = await body();
+      if (shiftMins(b.start, b.finish, b.break_min) == null) bad("Enter start and finish times like 08:00, finish after start.");
+      const br = Number(b.break_min || 0); if (!(br >= 0 && br <= 240)) bad("Break must be 0–240 minutes.");
+      const pay = b.pay_rate === undefined || b.pay_rate === "" ? s.pay_rate : penceFrom(b.pay_rate);
+      if (!(pay > 0)) bad("Enter the hourly pay rate, e.g. 13.00.");
+      const reason = clean(b.reason, 300); if (!reason) bad("Say why you're correcting it, so there's a record.");
+      const was = `${s.act_start}–${s.act_finish}, ${s.act_break} min break, £${pounds(s.pay_rate || 0)}/h`;
+      const note = `${s.ts_comment ? s.ts_comment + " · " : ""}Corrected by ${me.name} on ${fullDateUk(today)} (was ${was}): ${reason}`;
+      await env.DB.prepare("UPDATE shifts SET act_start=?, act_finish=?, act_break=?, pay_rate=?, ts_comment=? WHERE id=?").bind(b.start, b.finish, br, pay, note.slice(0, 1500), id).run();
+      await audit(env, me.email, "hours_corrected", id, { was, start: b.start, finish: b.finish, break_min: br, pay_rate: pay, reason });
       return json({ ok: true });
     }
 
@@ -1369,6 +1390,42 @@ async function api(req, env, url) {
     ]);
     await audit(env, me.email, "invoice_void", inv.number, null);
     return json({ ok: true });
+  }
+  if (p === "/api/pay" && method === "GET") {
+    // Payroll preview: what each worker will be paid for approved hours, with anything worth checking flagged.
+    const from = url.searchParams.get("from"), to = url.searchParams.get("to");
+    if (!validDate(from) || !validDate(to) || to < from) bad("Pick a date range.");
+    const st = await getSettings(env), hol = Number(st.holiday_pct) || 0;
+    const { results } = await env.DB.prepare(`SELECT ${SHIFT_COLS} ${SHIFT_FROM} WHERE s.status='filled' AND s.date BETWEEN ? AND ? ORDER BY u.name, s.date, s.start`).bind(from, to).all();
+    const workers = {}, excluded = [];
+    for (const s of results) {
+      if (s.ts_status !== "approved") { if (s.date <= today) excluded.push({ id: s.id, date: s.date, worker_name: s.worker_name, client_name: s.client_name, ts_status: s.ts_status }); continue; }
+      const mins = shiftMins(s.act_start, s.act_finish, s.act_break) || 0, booked = shiftMins(s.start, s.finish, s.break_min) || 0;
+      const basic = money(mins, s.pay_rate || 0), h = Math.round(basic * hol / 100), flags = [];
+      if (!s.pay_rate) flags.push("No pay rate on this shift");
+      else if (s.pay_rate < NLW_PENCE) flags.push(`Pay rate is below the National Living Wage (£${pounds(NLW_PENCE)}/h for 21 and over). Check their age`);
+      if (Math.abs(mins - booked) >= 30) flags.push(`${hrsTxt(Math.abs(mins - booked))} ${mins > booked ? "more" : "less"} than booked (${s.start}–${s.finish})`);
+      if (s.clock_in_at && s.clock_out_at) {
+        const inT = ukTime(s.clock_in_at), outT = ukTime(s.clock_out_at), expStart = toMin(inT) > toMin(s.start) ? inT : s.start;
+        if (Math.abs(toMin(s.act_start) - toMin(expStart)) > 15 || Math.abs(toMin(s.act_finish) - toMin(outT)) > 15) flags.push(`Hours differ from sign-in (arrived ${inT}, left ${outT})`);
+      } else if (s.clock_in_at && !s.clock_out_at) flags.push("Signed in but never signed out");
+      if (mins > 360 && (s.act_break || 0) < 20) flags.push("Over 6 hours with no 20-minute break");
+      const w = workers[s.worker_email] ||= { email: s.worker_email, name: s.worker_name, shifts: [], mins: 0, basic: 0, holiday: 0, total: 0 };
+      w.shifts.push({ id: s.id, date: s.date, client_name: s.client_name, start: s.start, finish: s.finish, act_start: s.act_start, act_finish: s.act_finish, act_break: s.act_break, mins, pay_rate: s.pay_rate, basic, holiday: h, total: basic + h, invoiced: !!s.invoice_id, comment: s.ts_comment, flags });
+      w.mins += mins; w.basic += basic; w.holiday += h; w.total += basic + h;
+    }
+    const list = Object.values(workers);
+    // Weekly hours against any limit recorded on their right-to-work check (e.g. Student visa 20 h in term time).
+    const lim = await checksFor(env, list.map(w => w.email));
+    for (const w of list) {
+      const limit = Number(lim[w.email]?.rtw?.detail?.weekly_hours_limit) || 0;
+      if (!limit) continue;
+      const weeks = {};
+      for (const x of w.shifts) { const d = new Date(x.date + "T12:00:00Z"), wk = addDays(x.date, -((d.getUTCDay() + 6) % 7)); weeks[wk] = (weeks[wk] || 0) + x.mins; }
+      w.flags = Object.entries(weeks).filter(([, m]) => m > limit * 60).map(([wk, m]) => `${hrsTxt(m)} in the week of ${fullDateUk(wk)}, over their ${limit}-hour weekly limit`);
+    }
+    for (const w of list) w.flagCount = w.shifts.reduce((a, x) => a + x.flags.length, 0) + (w.flags?.length || 0);
+    return json({ from, to, holiday_pct: hol, workers: list, excluded, totals: list.reduce((a, w) => ({ mins: a.mins + w.mins, basic: a.basic + w.basic, holiday: a.holiday + w.holiday, total: a.total + w.total }), { mins: 0, basic: 0, holiday: 0, total: 0 }) });
   }
   if (p === "/api/pay.csv" && method === "GET") {
     const from = url.searchParams.get("from"), to = url.searchParams.get("to");

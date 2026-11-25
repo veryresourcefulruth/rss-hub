@@ -312,3 +312,8 @@ tr.late td{background:var(--bad-soft)}
 .pp-choose{display:grid;gap:12px;margin:18px 0 14px}
 .pp-choose .btn{font-size:1.2rem;padding:16px;justify-content:center;text-align:center}
 .bill-branch{border-top:1px solid var(--line);padding:14px 0}.bill-branch:first-of-type{border-top:0}.bill-branch details{margin-top:6px}
+.pay-d > td{background:var(--bg);padding:10px 12px}
+.pay-lines{width:100%;margin-top:6px}
+.pay-lines td{padding:6px 8px;border-bottom:1px solid var(--line);font-size:.9rem}
+.filters label.note{display:inline-flex;align-items:center;gap:6px}
+.filters input[type=date]{max-width:170px}
